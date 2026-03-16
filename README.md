@@ -1,90 +1,72 @@
-# LLM Copilot MVP
+# LLM Copilot for Bank Card Dispute Handling
 
-MVP-платформа операторского copilot-сценария для карточных обращений: подозрительные списания, блокировка карты, создание обращения, audit trail и retrieval по внутренним регламентам. Проект задуман как **локальный dev-стенд и понятный backend-контур**, на который можно быстро навесить BFF или frontend-UI без долгого раскопа чужих инженерных привычек.
+Backend MVP системы класса LLM Copilot для поддержки оператора банка при обработке обращений, связанных со спорными операциями по платежным картам. Проект реализует сценарии анализа диалога, поиска по внутренним регламентам, формирования подсказок оператору, выполнения инструментальных действий через выделенный сервис и ведения аудита.
 
-> Если коротко: это backend для операторского copilot-а, который помогает оператору не импровизировать на банковские темы, а действовать по регламенту, с RAG, tool-driven flow и контролируемым state.
+## Overview
 
----
+Система предназначена для поддержки оператора в сценариях, где требуется соблюдать регламент, последовательно собирать обязательные сведения и исключать неподтвержденные действия. Основная задача проекта состоит в том, чтобы помочь оператору вести обработку обращения в управляемом процессе, а не полагаться на неформальные шаблоны ответа.
 
-## 1. Что это за продукт и зачем он нужен
+Проект ориентирован на локальную разработку, демонстрацию архитектурного подхода и интеграцию с внешним BFF или пользовательским интерфейсом. Он не является production-решением, но закладывает основу для дальнейшего развития в сторону промышленной системы.
 
-### Проблема
-Оператор карточной поддержки работает в сценариях, где легко ошибиться:
-- можно упустить обязательное уточнение;
-- можно нарушить ограничения по ПДн и социнжинирингу;
-- можно перепутать сценарии: dispute, lost/stolen, duplicate, recurring payment;
-- можно сказать клиенту то, чего система ещё не сделала;
-- можно потерять связность между диалогом, кейсом, tool execution и audit.
+## Problem Statement
 
-### Что делает LLM Copilot MVP
-Система помогает оператору вести диалог и принимать действия **не “по вдохновению”, а по контролируемому pipeline**:
-- анализирует последнее сообщение клиента;
-- поднимает релевантные куски регламентов из RAG;
-- строит suggestion для оператора: `ghost_text`, quick cards, form cards, sidebar;
-- показывает допустимые действия (`tools`) по текущему состоянию сценария;
-- выполняет инструменты через отдельный сервис;
-- пишет аудит и сохраняет объектное состояние.
+При обработке карточных обращений оператор работает в условиях, где критичны точность, последовательность и соблюдение требований безопасности. В подобных сценариях необходимо:
 
-### Для кого проект
-Проект полезен, если нужно:
-- быстро поднять локальный backend-контур copilot-а;
-- дать фронту понятный API и структуру state;
-- показать MVP-логику на демо/защите;
-- тестировать операторские сценарии через `curl`, BFF или UI;
-- иметь seed-корпус документов для RAG “из коробки”.
+- корректно различать тип обращения;
+- не пропускать обязательные уточнения;
+- не выполнять действия без подтверждения;
+- учитывать ограничения, связанные с персональными данными и антифрод-процедурами;
+- сохранять связность между диалогом, кейсом, инструментальными действиями и аудитом.
 
-### Что это **не** делает
-Это не готовый prod-банк. Это **MVP/dev-стенд** с правильной логикой границ, ролей и сценариев, который можно развивать дальше.
+## Project Goals
 
----
+Проект решает следующие задачи:
 
-## 2. Что уже умеет система
+- хранение истории диалога и связанных артефактов;
+- поиск релевантных фрагментов регламентов и скриптов с использованием RAG;
+- формирование структурированных подсказок оператору;
+- отображение допустимых действий в зависимости от текущего состояния сценария;
+- выполнение подтвержденных инструментальных действий через отдельный сервис;
+- ведение аудита по ключевым операциям и изменениям состояния.
 
-- ведёт диалоги по `conversation_id`;
-- создаёт task-based copilot suggestions;
-- хранит и отдаёт `copilot state` по разговору;
-- запускает инструменты через отдельный `mcp_tools` сервис;
-- создаёт кейсы и ведёт `audit trail`;
-- индексирует документы в RAG и ищет по ним;
-- различает `policy / security / script` источники;
-- ограничивает доступ на уровне `conversation`, `case`, `task`;
-- поддерживает `safe mode` для рискованных входов;
-- использует детерминированный update state после `tool_result`;
-- поддерживает `docx / pdf / txt` ingest;
-- поставляется с seed-корпусом документов в `docs/rag_corpus/`.
+## Core Capabilities
 
----
+На текущем этапе система поддерживает:
 
-## 3. Архитектурная идея
+- ведение диалогов по `conversation_id`;
+- асинхронное формирование copilot-подсказок по `task_id`;
+- хранение и выдачу состояния copilot по диалогу;
+- поиск по документам и индексированному RAG-корпусу;
+- выполнение tool-вызовов через отдельный сервис `mcp_tools`;
+- создание кейсов и ведение `audit trail`;
+- разграничение доступа на уровне `conversation`, `case` и `task`;
+- обработку документов форматов `docx`, `pdf`, `txt`;
+- использование seed-корпуса документов для локального запуска и демонстрации.
 
-Проект построен как набор отдельных сервисов с общей контрактной и инфраструктурной базой:
-- `backend` — внешний HTTP API и оркестрация;
-- `worker` — async pipeline suggest/analyze/draft;
-- `mcp_tools` — исполнение tool actions;
-- `postgres` — основное состояние;
-- `redis` — кэш, task state, idempotency;
-- `minio` — хранение документов;
-- `kafka` — event-bus слой.
+## Architecture
 
-### Ключевой принцип
-**LLM не должна напрямую менять факт выполнения действий.**
-Фактическое состояние изменяется только после реального `tool_result`, а не потому что модель решила звучать слишком уверенно. Да, для банковских сценариев это полезно. Кто бы мог подумать.
+Проект построен как многокомпонентный backend-контур с разделением ответственности между сервисами:
 
----
+- `backend` — внешний HTTP API и оркестрация сценариев;
+- `worker` — асинхронная обработка цепочек `analyze -> rag -> draft`;
+- `mcp_tools` — выполнение инструментальных действий;
+- `PostgreSQL` — основное хранилище данных;
+- `Redis` — кэш, статусы задач, временное состояние;
+- `MinIO` — хранение документов;
+- `Kafka` — шина событий и аудит.
 
-## 4. Схема сервисов
+### Key Principle
 
-> GitHub нормально рендерит `mermaid`, так что эти схемы можно держать прямо в `README.md`.
+Языковая модель не изменяет фактическое состояние системы напрямую. Изменения, влияющие на обслуживание клиента, фиксируются только после подтвержденного и успешно выполненного `tool_result`. Такой подход позволяет отделить рекомендации модели от фактических действий системы.
 
-### 4.1 Общая топология
+### High-Level Diagram
 
 ```mermaid
 flowchart LR
-    UI[Frontend / BFF / Operator UI] -->|HTTP + operator headers| BE[backend :8080]
-
-    BE --> WRK[worker]
-    BE --> MCP[mcp_tools :8090]
-    BE --> PG[(Postgres)]
+    UI[Frontend / BFF / Operator UI] --> BE[Backend API]
+    BE --> WRK[Worker]
+    BE --> MCP[MCP Tools]
+    BE --> PG[(PostgreSQL)]
     BE --> RD[(Redis)]
     BE --> MN[(MinIO)]
     BE --> KF[(Kafka)]
@@ -97,124 +79,82 @@ flowchart LR
     MCP --> PG
     MCP --> RD
     MCP --> KF
-
-    MN -->|RAG corpus / uploaded docs| WRK
-    PG -->|cases / conversations / audit / chunks| BE
 ```
 
-### 4.2 Pipeline `suggest`
+## Suggestion Pipeline
 
-```mermaid
-sequenceDiagram
-    participant UI as Frontend/BFF
-    participant BE as backend
-    participant RD as Redis
-    participant WRK as worker
-    participant PG as Postgres
-    participant MN as MinIO
+Сценарий формирования подсказки оператору включает следующие этапы:
 
-    UI->>BE: POST /copilot/suggest
-    BE->>RD: create task meta
-    BE-->>UI: task_id
+1. получение контекста диалога;
+2. анализ последнего сообщения клиента;
+3. поиск релевантных регламентов через RAG;
+4. генерацию структурированного ответа для UI;
+5. сохранение результата и состояния задачи.
 
-    WRK->>PG: load conversation/messages
-    WRK->>RD: check analyze/rag/draft cache
-    WRK->>MN: load docs if needed
-    WRK->>PG: retrieve RAG chunks
-    WRK->>WRK: analyze -> plan -> draft
-    WRK->>RD: persist task result/state
+Результат подсказки может включать:
 
-    UI->>BE: GET /copilot/suggest/{task_id}
-    BE->>RD: read task by owner
-    BE-->>UI: succeeded + ghost_text + sidebar + tools
-```
+- `ghost_text`;
+- `quick_cards`;
+- `form_cards`;
+- `sidebar` с текущей фазой, намерением, источниками, инструментами и рисковыми флагами.
 
-### 4.3 Pipeline `tool execution`
+## Tool Execution Flow
 
-```mermaid
-sequenceDiagram
-    participant UI as Frontend/BFF
-    participant BE as backend
-    participant MCP as mcp_tools
-    participant PG as Postgres
-    participant RD as Redis
+Инструментальные действия выполняются только после явного подтверждения оператора. Backend проверяет допустимость действия в текущем состоянии сценария, передает запрос в `mcp_tools`, а затем обновляет состояние и аудит на основании фактического результата.
 
-    UI->>BE: POST /copilot/tools/execute
-    BE->>BE: access check + policy check
-    BE->>MCP: tool request
-    MCP->>RD: idempotency check
-    MCP->>PG: create/update domain entity
-    MCP-->>BE: tool_result
-    BE->>PG: audit + deterministic state update
-    BE-->>UI: explain + updated state
-```
+Примеры поддерживаемых действий:
 
-### 4.4 Что видит фронт
+- `create_case`
+- `get_case_status`
+- `get_transactions`
+- `block_card`
+- `unblock_card`
+- `reissue_card`
+- `get_card_limits`
+- `set_card_limits`
+- `toggle_online_payments`
 
-```mermaid
-flowchart TD
-    A[conversation messages] --> B[copilot suggest]
-    B --> C[ghost_text]
-    B --> D[quick_cards]
-    B --> E[form_cards]
-    B --> F[sidebar]
-
-    F --> F1[phase]
-    F --> F2[intent]
-    F --> F3[plan steps]
-    F --> F4[sources]
-    F --> F5[tools]
-    F --> F6[risk checklist]
-    F --> F7[danger flags]
-```
-
----
-
-## 5. Структура репозитория
+## Repository Structure
 
 ```text
 .
-├── apps/
-│   ├── backend/               # FastAPI backend
-│   │   └── app/
-│   │       ├── api/v1/routes/ # внешние и внутренние HTTP-ручки
-│   │       └── core/          # access, deps, audit, bus, state helpers
-│   ├── worker/                # async suggest / analyze / draft pipeline
-│   └── mcp_tools/             # tool execution service
-├── libs/
-│   └── common/                # db, rag, llm, models, kafka, security, utils
+├── apps/                      # прикладные компоненты и точки входа
+├── docs/                      # документация и seed-корпус для RAG
+├── libs/                      # общие библиотеки и инфраструктурный код
 ├── packages/
-│   └── contracts/             # pydantic contracts / shared schemas
-├── docs/
-│   ├── rag_corpus/            # seed corpus для RAG
-│   └── *.md                   # архитектурные и служебные документы
-├── tests/                     # unit/smoke tests
-├── docker-compose.yml         # локальный dev-стенд
-├── requirements.txt
-├── Makefile
-└── .env.example
+│   └── contracts/             # общие контракты и схемы
+├── services/                  # backend, worker, mcp_tools
+├── shared/                    # общий код и переиспользуемые модули
+├── tests/                     # unit и smoke tests
+├── .env.example               # шаблон переменных окружения
+├── docker-compose.yml         # локальный стенд
+├── Makefile                   # команды управления проектом
+└── requirements.txt
 ```
 
-Смысл раскладки простой:
-- `apps/` содержит исполняемые сервисы;
-- `libs/common/` хранит общий код;
-- `packages/contracts/` отделяет контракты;
-- `docs/rag_corpus/` содержит стартовую базу знаний.
+## Technology Stack
 
-То есть уже видно, где продукт, где инфраструктура, а где бумажная бюрократия для retrieval.
+- Python
+- FastAPI
+- PostgreSQL
+- Redis
+- MinIO
+- Kafka
+- Docker Compose
+- RAG / embeddings pipeline
+- LLM API integration
 
----
+## Quick Start
 
-## 6. Быстрый старт
+### Requirements
 
-### 6.1 Требования
+Для локального запуска необходимы:
 
-Нужны:
-- Docker + Docker Compose;
-- свободные порты `8080`, `8090`, `5432`, `6379`, `9000`, `9001`, `9092`;
-- локальный `.env` на основе `.env.example`.
+- Docker
+- Docker Compose
+- свободные порты для сервисов из `docker-compose.yml`
 
-### 6.2 Поднять стек
+### Run
 
 Linux/macOS:
 
@@ -230,7 +170,7 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
-### 6.3 Проверить, что всё живо
+### Health Check
 
 ```bash
 curl http://localhost:8080/health
@@ -238,269 +178,130 @@ curl http://localhost:8090/health
 docker compose ps
 ```
 
-Ожидаемый ответ для health:
+Ожидаемый ответ:
 
 ```json
-{"ok":true}
+{"ok": true}
 ```
 
----
+## Example Workflow
 
-## 7. Важно про данные
+Базовый сценарий использования:
 
-В `docker-compose.yml` используются named volumes:
-- `postgres_data`
-- `redis_data`
-- `minio_data`
-
-Поэтому:
-- `docker compose down` удаляет контейнеры, но сохраняет данные;
-- `docker compose down -v` удаляет контейнеры и volumes, то есть делает полную зачистку.
-
-Это важно. Иначе потом начинаются трагические рассказы о том, что “данные почему-то исчезли сами”.
-
----
-
-## 8. Быстрый smoke-test
-
-### 8.1 Заголовки operator-запросов
-
-Windows CMD:
-
-```cmd
-set TOKEN=dev-internal-token
-set ROLE=operator
-set AID=op-1
-```
-
-### 8.2 Загрузить seed-корпус в RAG
-
-```bash
-curl -s -X POST "http://localhost:8080/api/v1/docs/bootstrap-seed" \
-  -H "X-Internal-Auth: dev-internal-token" \
-  -H "X-Actor-Role: operator" \
-  -H "X-Actor-Id: op-1"
-```
-
-### 8.3 Проверить RAG-поиск
-
-```bash
-curl -s -X POST "http://localhost:8080/api/v1/rag/search" \
-  -H "X-Internal-Auth: dev-internal-token" \
-  -H "X-Actor-Role: operator" \
-  -H "X-Actor-Id: op-1" \
-  -H "Content-Type: application/json" \
-  --data '{"query":"клиент сообщил код из SMS и просит заблокировать карту","top_k":5}'
-```
-
-### 8.4 Создать разговор
-
-```bash
-curl -s -X POST "http://localhost:8080/api/v1/chat/conversations" \
-  -H "X-Internal-Auth: dev-internal-token" \
-  -H "X-Actor-Role: operator" \
-  -H "X-Actor-Id: op-1"
-```
-
-### 8.5 Запустить suggest
-
-1. создать conversation;
-2. отправить сообщение;
+1. создать диалог;
+2. добавить сообщение клиента;
 3. вызвать `POST /api/v1/copilot/suggest`;
 4. получить `task_id`;
-5. читать `GET /api/v1/copilot/suggest/{task_id}`.
+5. запросить результат по `GET /api/v1/copilot/suggest/{task_id}`;
+6. отобразить подсказки оператору;
+7. при необходимости выполнить подтвержденный tool-вызов;
+8. получить обновленное состояние и запись в аудите.
 
-### 8.6 Проверить tool execution
+## Frontend and BFF Integration
 
-Базовый happy-path:
-- `create_case`
-- `block_card`
-- `cases?conversation_id=...`
-- `audit?conversation_id=...`
+Проект изначально рассчитан на интеграцию с внешним пользовательским интерфейсом. Backend предоставляет API, на которое может быть навешан как промежуточный BFF-слой, так и полноценный operator UI.
 
----
+Рекомендуемая схема интеграции:
 
-## 9. Seed-корпус RAG
+- `UI -> BFF -> backend`
 
-Проект уже содержит стартовый корпус документов:
+Такой подход позволяет централизовать авторизацию, преобразование контрактов и серверную агрегацию данных. Для локальной разработки допустимо обращаться к backend напрямую, однако в прикладной архитектуре предпочтителен BFF-слой.
 
-- `REG-DSP-001` — оспаривание операций;
-- `REG-BLK-002` — блокировка карты;
-- `REG-SEC-003` — ПДн и социнжиниринг;
-- `REG-TRX-004` — отложенные и дублированные списания;
-- `REG-LST-005` — утеря / кража / компрометация;
-- `REG-SUB-006` — подписки и recurring payments;
-- `REG-ESC-007` — антифрод-эскалация;
-- `REG-STS-008` — статусы кейсов и коммуникация;
-- `REG-FBK-009` — fallback при недоступности инструментов;
-- `SCRIPT-OPS-001`, `SCRIPT-OPS-002` — скриптовый слой для draft.
+### Required Headers
 
-### Как работает retrieval
+Для операторских запросов используются следующие заголовки:
 
-- из документов извлекаются `doc_code`, `source_type`, `version_label`, `effective_date`;
-- служебная шапка не лезет в индекс как полезное знание;
-- `security/policy` получают больший вес, чем `script`;
-- похожие куски не забивают top-k;
-- один и тот же retriever используется и для `/rag/search`, и для worker.
-
----
-
-## 10. Как фронту подключаться к copilot
-
-### Базовая идея
-Фронт может уже сейчас навешивать UI на backend через HTTP.
-Для локальной разработки достаточно ходить в:
-
-- `http://localhost:8080` — backend
-- `http://localhost:8090` — mcp_tools, если нужен отдельный сервисный дебаг
-
-Но нормальная схема для продукта такая:
-- UI → BFF → backend
-- прямой доступ браузера к внутренним маршрутам лучше не превращать в привычку.
-
-### Обязательные заголовки
-Операторские запросы должны идти с:
 - `X-Internal-Auth`
 - `X-Actor-Role`
 - `X-Actor-Id`
 
-### Основные ручки, которые нужны фронту
+### Main Endpoints for Frontend
 
-#### Диалоги
+#### Chat
+
 - `POST /api/v1/chat/conversations`
 - `POST /api/v1/chat/conversations/{conversation_id}/messages`
 
 #### Copilot
+
 - `POST /api/v1/copilot/suggest`
 - `GET /api/v1/copilot/suggest/{task_id}`
 - `GET /api/v1/copilot/state?conversation_id=...`
 - `POST /api/v1/copilot/tools/execute`
 
-#### Кейсы и аудит
+#### Cases and Audit
+
 - `GET /api/v1/cases?conversation_id=...`
 - `GET /api/v1/audit?conversation_id=...`
 
-#### Документы и RAG
+#### Documents and RAG
+
 - `POST /api/v1/docs/bootstrap-seed`
 - `GET /api/v1/docs`
 - `POST /api/v1/rag/search`
 
----
+## UI Rendering Model
 
-## 11. Что именно фронт может рендерить
+Минимальный интерфейс оператора может быть построен вокруг следующих блоков.
 
-Минимальный UI для operator copilot-а можно строить так.
+### Left Panel
 
-### Левая колонка
-- список разговоров;
-- текущая лента сообщений;
+- список диалогов;
+- история сообщений;
 - поле ввода оператора.
 
-### Центральная панель
+### Central Panel
+
 - `ghost_text`;
-- quick cards;
-- form cards;
-- draft suggestions.
+- `quick_cards`;
+- `form_cards`;
+- `draft suggestions`.
 
-### Правая панель
-Рендерить из `sidebar`:
-- `phase`
-- `intent`
-- `plan.steps`
-- `sources`
-- `tools`
-- `risk_checklist`
-- `danger_flags`
+### Right Panel
 
-### Action bar
-Кнопки строить из `result.sidebar.tools`:
-- `create_case`
-- `block_card`
-- `get_transactions`
-- `reissue_card`
+Данные из `sidebar` могут использоваться для отображения:
 
-Важно: фронт должен уважать `enabled/reason`, а не придумывать доступность действий сам. Иначе backend скажет “tool disabled”, а UI будет делать вид, что всё можно. Как обычно, самая слабая часть системы часто сидит ближе всего к пользователю.
+- текущей фазы сценария;
+- определенного намерения клиента;
+- плана действий;
+- источников, использованных при формировании ответа;
+- доступных инструментов;
+- чек-листа рисков;
+- предупреждающих флагов.
 
----
+### Action Bar
 
-## 12. Типовой UI-flow для фронта
+Панель действий должна строиться на основе списка инструментов, полученного от backend. Доступность действий должна определяться сервером, а не клиентской логикой интерфейса.
 
-### Flow: suggest
-1. оператор пишет сообщение;
-2. фронт вызывает `POST /copilot/suggest`;
-3. получает `task_id`;
-4. поллит `GET /copilot/suggest/{task_id}`;
-5. когда task `succeeded`, рендерит:
-   - `ghost_text`
-   - `quick_cards`
-   - `form_cards`
-   - `sidebar`
+## Typical Frontend Flow
 
-### Flow: tool execution
-1. фронт берёт `tool` из `sidebar.tools`;
-2. проверяет `enabled`;
-3. вызывает `POST /copilot/tools/execute`;
-4. показывает `explain.ghost_text`;
-5. при необходимости обновляет `cases`, `audit`, `copilot state`.
+### Suggest Flow
 
----
+1. оператор отправляет сообщение;
+2. frontend вызывает `POST /api/v1/copilot/suggest`;
+3. backend возвращает `task_id`;
+4. frontend запрашивает `GET /api/v1/copilot/suggest/{task_id}`;
+5. после завершения задачи интерфейс отображает `ghost_text`, `quick_cards`, `form_cards` и `sidebar`.
 
-## 13. Переменные окружения
+### Tool Execution Flow
 
-Все реальные ключи и секреты должны жить только в локальном `.env`.
+1. frontend получает доступные действия из `sidebar.tools`;
+2. пользователь подтверждает запуск инструмента;
+3. frontend вызывает `POST /api/v1/copilot/tools/execute`;
+4. backend возвращает обновленное состояние, пояснение и данные для повторного рендера.
 
-Ключевые переменные:
-- `INTERNAL_AUTH_TOKEN`
-- `DATABASE_URL`
-- `REDIS_URL`
-- `MINIO_ENDPOINT`
-- `MINIO_ACCESS_KEY`
-- `MINIO_SECRET_KEY`
-- `MINIO_BUCKET`
-- `LLM_PROVIDER`
-- `LLM_BASE_URL`
-- `LLM_API_KEY`
-- `LLM_ANALYZE_MODEL`
-- `LLM_DRAFT_MODEL`
-- `LLM_EXPLAIN_MODEL`
-- `LLM_GHOST_MODEL`
-- `EMBED_PROVIDER`
-- `EMBED_BASE_URL`
-- `EMBED_MODEL`
-- `RAG_SEED_DIR`
+## Security and Operational Constraints
 
----
+Проект учитывает ряд ограничений, характерных для банковских сценариев:
 
-## 14. Роли и доступ
+- чувствительные действия не выполняются автоматически;
+- права доступа проверяются на уровне объектов и задач;
+- внутренние вызовы отделены от внешнего интерфейса;
+- результаты модели не считаются фактом до подтвержденного действия;
+- аудит фиксирует ключевые события и изменения состояния;
+- структура ответа модели ориентирована на серверную валидацию и предсказуемую интеграцию с UI.
 
-### `operator`
-Операторский UI и copilot-flow.
-
-### `service`
-Только внутренние service-to-service вызовы.
-
-### Object-level access
-Проверяется для:
-- `conversation`
-- `case`
-- `task`
-
-Это значит, что оператор не должен видеть чужой `task_id`, даже если кто-то зачем-то решил им поделиться.
-
----
-
-## 15. Безопасность и ограничения
-
-- task-based endpoints проверяют владельца задачи;
-- внутренние `/api/v1/_internal/*` доступны только роли `service`;
-- `tool_result` не может произвольно перезаписать `phase/plan`;
-- safe mode режет опасный контекст;
-- audit хранит фактическую последовательность событий;
-- чувствительные действия должны подтверждаться реальным `tool_result`, а не красивым текстом модели.
-
----
-
-## 16. Команды разработки
+## Development Commands
 
 ```bash
 make up
@@ -512,9 +313,9 @@ make test
 make lint
 ```
 
-Если `make` на машине нет, используй прямые команды `docker compose` и `pytest`.
+Если `make` недоступен, можно использовать прямые команды `docker compose` и `pytest`.
 
-### Локальный запуск тестов без Docker
+## Testing Without Docker
 
 Linux/macOS:
 
@@ -534,56 +335,51 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
----
+## Environment Variables
 
-## 17. Диагностика
+Ключевые параметры окружения задаются локально через `.env` на основе `.env.example`.
 
-Полезные команды:
+Примеры:
 
-```bash
-docker compose logs --tail=100 backend
-docker compose logs --tail=100 worker
-docker compose logs --tail=100 mcp-tools
-docker compose logs --tail=100 postgres
-docker compose logs --tail=100 redis
-docker compose logs --tail=100 kafka
-```
+- `INTERNAL_AUTH_TOKEN`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `MINIO_ENDPOINT`
+- `MINIO_ACCESS_KEY`
+- `MINIO_SECRET_KEY`
+- `MINIO_BUCKET`
+- `LLM_PROVIDER`
+- `LLM_BASE_URL`
+- `LLM_API_KEY`
+- `LLM_ANALYZE_MODEL`
+- `LLM_DRAFT_MODEL`
+- `LLM_EXPLAIN_MODEL`
+- `LLM_GHOST_MODEL`
+- `EMBED_PROVIDER`
+- `EMBED_BASE_URL`
+- `EMBED_MODEL`
+- `RAG_SEED_DIR`
 
-Очистить Redis-кэш:
+## What Should Not Be Committed
 
-```bash
-docker compose exec redis redis-cli FLUSHDB
-```
+В репозиторий и архивы не следует включать:
 
-Полностью снести стек с данными:
-
-```bash
-docker compose down -v
-```
-
----
-
-## 18. Что не надо коммитить и паковать
-
-Не включай в репозиторий и архивы:
 - `.env`
 - `.git`
 - `__pycache__`
 - `.pytest_cache`
-- локальные дампы
+- локальные дампы данных
 - временные build artifacts
 
-Иначе потом снова окажется, что секреты “как-то сами” попали в архив. Разумеется. Они же очень любят путешествовать без спроса.
+## Project Status
 
----
+Текущая версия проекта представляет собой backend MVP для демонстрации архитектуры operator copilot в сценариях карточных обращений. Репозиторий может использоваться как:
 
-## 19. Итог
+- учебный проект;
+- демонстрационный стенд;
+- основа для дальнейшей интеграции с frontend/BFF;
+- заготовка для расширения бизнес-логики и сервисного контура.
 
-`LLM Copilot MVP` — это не просто набор сервисов, а уже рабочий backend-контур операторского copilot-а, на который можно:
-- поднять локальный dev-стенд;
-- навесить frontend;
-- гонять сценарии через API;
-- тестировать tool-driven flow;
-- развивать product logic дальше.
+## Summary
 
-Если тебе нужен репозиторий, который можно спокойно клонировать, поднять и начать интегрировать с UI без недельного гадания, что тут вообще происходит, то README должен быть именно таким: прямым, подробным и не надеющимся на телепатию следующего человека.
+LLM Copilot for Bank Card Dispute Handling — это backend MVP, демонстрирующий подход к построению операторского copilot-сценария с управляемой логикой, RAG по внутренним регламентам, подтверждаемыми инструментальными действиями и полным аудитом ключевых событий.
