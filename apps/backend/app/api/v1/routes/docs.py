@@ -4,7 +4,7 @@ import io
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -125,18 +125,37 @@ async def _index_document(db: AsyncSession, d: Document, chunks: list[dict[str, 
         embs = await embed_texts([item['text'] for item in batch])
         for item, emb in zip(batch, embs):
             chunk_no += 1
-            db.add(RagChunk(
-                doc_id=d.id,
-                title=d.title,
-                doc_code=d.doc_code,
-                source_type=d.source_type,
-                source_priority=float(d.source_priority or 1.0),
-                section=item['section'][:256],
-                text=item['text'],
-                embedding=emb,
-            ))
+            db.add(
+                RagChunk(
+                    doc_id=d.id,
+                    title=d.title,
+                    doc_code=d.doc_code,
+                    version_label=d.version_label,
+                    effective_date=d.effective_date,
+                    source_type=d.source_type,
+                    source_priority=float(d.source_priority or 1.0),
+                    section=(item.get('section') or '')[:256],
+                    section_path=(item.get('section_path') or item.get('section') or '')[:512],
+                    chunk_type=(item.get('chunk_type') or 'paragraph')[:32],
+                    risk_tags=(item.get('risk_tags') or '')[:256],
+                    is_mandatory_step=str(item.get('is_mandatory_step') or '') in {'1', 'true', 'True'},
+                    text=item['text'],
+                    embedding=emb,
+                )
+            )
         await db.commit()
     return chunk_no
+
+
+async def _load_doc_bytes(storage_key: str) -> bytes:
+    c = _minio()
+    bucket = settings.minio_bucket
+    obj = c.get_object(bucket, storage_key)
+    try:
+        return obj.read()
+    finally:
+        obj.close()
+        obj.release_conn()
 
 
 @router.post('/upload')
@@ -147,9 +166,11 @@ async def upload_doc(
 ):
     data = await file.read()
     doc_id = f'doc-{uuid.uuid4().hex[:10]}'
-    meta, _ = _meta_and_chunks(file.filename, data)
+    meta, chunks = _meta_and_chunks(file.filename, data)
     storage_key = await _store_doc_bytes(doc_id=doc_id, filename=file.filename, data=data)
     d = await _upsert_document(db, doc_id=doc_id, storage_key=storage_key, meta=meta)
+    indexed_chunks = await _index_document(db, d, chunks)
+
     return {
         'doc_id': d.id,
         'title': d.title,
@@ -157,6 +178,8 @@ async def upload_doc(
         'source_type': d.source_type,
         'version': d.version,
         'version_label': d.version_label,
+        'indexed_chunks': indexed_chunks,
+        'auto_indexed': True,
     }
 
 
@@ -186,17 +209,23 @@ async def bootstrap_seed(actor=Depends(require_operator), db: AsyncSession = Dep
 
 
 @router.post('/reindex')
-async def reindex(actor=Depends(require_operator), db: AsyncSession = Depends(get_db)):
-    docs = (await db.execute(select(Document))).scalars().all()
-    c = _minio()
-    bucket = settings.minio_bucket
+async def reindex(
+    doc_id: str | None = Query(default=None),
+    actor=Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
+    q = select(Document)
+    if doc_id:
+        q = q.where(Document.id == doc_id)
+    docs = (await db.execute(q)).scalars().all()
+    if doc_id and not docs:
+        raise HTTPException(status_code=404, detail='document not found')
 
     indexed = 0
     indexed_chunks = 0
 
     for d in docs:
-        obj = c.get_object(bucket, d.storage_key)
-        data = obj.read()
+        data = await _load_doc_bytes(d.storage_key)
         meta, chunks = _meta_and_chunks(Path(d.storage_key).name, data)
         d.title = meta['title']
         d.doc_code = meta['doc_code']
@@ -209,7 +238,12 @@ async def reindex(actor=Depends(require_operator), db: AsyncSession = Depends(ge
         indexed += 1
         indexed_chunks += await _index_document(db, d, chunks)
 
-    return {'indexed_docs': indexed, 'indexed_chunks': indexed_chunks, 'batch_size': 128}
+    return {
+        'indexed_docs': indexed,
+        'indexed_chunks': indexed_chunks,
+        'batch_size': 128,
+        'doc_id': doc_id,
+    }
 
 
 @router.get('')
@@ -246,4 +280,42 @@ async def doc_meta(doc_id: str, actor=Depends(require_operator), db: AsyncSessio
         'version_label': d.version_label,
         'effective_date': d.effective_date,
         'storage_key': d.storage_key,
+    }
+
+
+@router.get('/{doc_id}/chunks')
+async def doc_chunks(
+    doc_id: str,
+    limit: int = Query(default=50, ge=1, le=500),
+    actor=Depends(require_operator),
+    db: AsyncSession = Depends(get_db),
+):
+    d = (await db.execute(select(Document).where(Document.id == doc_id))).scalar_one_or_none()
+    if not d:
+        raise HTTPException(status_code=404, detail='document not found')
+
+    rows = (
+        await db.execute(
+            select(RagChunk)
+            .where(RagChunk.doc_id == doc_id)
+            .order_by(RagChunk.id.asc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    return {
+        'doc_id': doc_id,
+        'title': d.title,
+        'items': [
+            {
+                'id': row.id,
+                'section': row.section,
+                'section_path': row.section_path,
+                'chunk_type': row.chunk_type,
+                'risk_tags': row.risk_tags,
+                'is_mandatory_step': row.is_mandatory_step,
+                'text': row.text,
+            }
+            for row in rows
+        ],
     }

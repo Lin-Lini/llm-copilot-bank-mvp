@@ -49,7 +49,7 @@ services:
     ports:
       - "9092:9092"
 
-  backend:
+  migrate:
     build:
       context: .
       dockerfile: apps/backend/Dockerfile
@@ -58,6 +58,7 @@ services:
     environment:
       APP_ENV: ${APP_ENV:-dev}
       INTERNAL_AUTH_TOKEN: ${INTERNAL_AUTH_TOKEN:-dev-internal-token}
+      INTERNAL_AUTH_SIGNING_KEY: ${INTERNAL_AUTH_SIGNING_KEY:-dev-internal-signing-key}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/copilot}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -68,7 +69,44 @@ services:
       KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka:9092}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
       MCP_TOOLS_URL: ${MCP_TOOLS_URL:-http://mcp-tools:8090}
-      # LLM + RAG (optional; defaults keep stub mode)
+      LLM_PROVIDER: ${LLM_PROVIDER:-stub}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_ANALYZE_MODEL: ${LLM_ANALYZE_MODEL:-}
+      LLM_DRAFT_MODEL: ${LLM_DRAFT_MODEL:-}
+      LLM_EXPLAIN_MODEL: ${LLM_EXPLAIN_MODEL:-}
+      LLM_GHOST_MODEL: ${LLM_GHOST_MODEL:-}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-800}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      EMBED_PROVIDER: ${EMBED_PROVIDER:-stub}
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      INTERNAL_AUTH_TOKEN: ${INTERNAL_AUTH_TOKEN:-dev-internal-token}
+      INTERNAL_AUTH_SIGNING_KEY: ${INTERNAL_AUTH_SIGNING_KEY:-dev-internal-signing-key}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/copilot}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-copilot-docs}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka:9092}
+      KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
+      MCP_TOOLS_URL: ${MCP_TOOLS_URL:-http://mcp-tools:8090}
       LLM_PROVIDER: ${LLM_PROVIDER:-stub}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_ANALYZE_MODEL: ${LLM_ANALYZE_MODEL:-}
@@ -82,6 +120,8 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_MODEL: ${EMBED_MODEL:-}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:
@@ -101,10 +141,13 @@ services:
       - .env
     environment:
       INTERNAL_AUTH_TOKEN: ${INTERNAL_AUTH_TOKEN:-dev-internal-token}
+      INTERNAL_AUTH_SIGNING_KEY: ${INTERNAL_AUTH_SIGNING_KEY:-dev-internal-signing-key}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka:9092}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_started
       kafka:
@@ -122,6 +165,7 @@ services:
       - .env
     environment:
       INTERNAL_AUTH_TOKEN: ${INTERNAL_AUTH_TOKEN:-dev-internal-token}
+      INTERNAL_AUTH_SIGNING_KEY: ${INTERNAL_AUTH_SIGNING_KEY:-dev-internal-signing-key}
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/copilot}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -132,7 +176,6 @@ services:
       KAFKA_BOOTSTRAP: ${KAFKA_BOOTSTRAP:-kafka:9092}
       KAFKA_ENABLED: ${KAFKA_ENABLED:-true}
       MCP_TOOLS_URL: ${MCP_TOOLS_URL:-http://mcp-tools:8090}
-      # LLM + RAG (optional)
       LLM_PROVIDER: ${LLM_PROVIDER:-stub}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_ANALYZE_MODEL: ${LLM_ANALYZE_MODEL:-}
@@ -146,6 +189,8 @@ services:
       EMBED_BASE_URL: ${EMBED_BASE_URL:-}
       EMBED_MODEL: ${EMBED_MODEL:-}
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

@@ -1,72 +1,89 @@
-# LLM Copilot для обработки спорных операций по банковским картам
+# LLM Copilot MVP
 
-Backend MVP системы класса LLM Copilot для поддержки оператора банка при обработке обращений, связанных со спорными операциями по платежным картам. Проект реализует сценарии анализа диалога, поиска по внутренним регламентам, формирования подсказок оператору, выполнения инструментальных действий через выделенный сервис и ведения аудита.
+MVP-платформа операторского copilot-сценария для обработки карточных обращений: подозрительные списания, блокировка карты, создание обращения, retrieval по внутренним регламентам, audit trail и контролируемое выполнение действий через tools.
 
-## Обзор
+Проект представляет собой backend-контур для операторского copilot-а, который помогает оператору действовать в соответствии с регламентом, используя RAG, tool-driven flow, аудит и детерминированное управление состоянием.
 
-Система предназначена для поддержки оператора в сценариях, где требуется соблюдать регламент, последовательно собирать обязательные сведения и исключать неподтвержденные действия. Основная задача проекта состоит в том, чтобы помочь оператору вести обработку обращения в управляемом процессе, а не полагаться на неформальные шаблоны ответа.
+---
 
-Проект ориентирован на локальную разработку, демонстрацию архитектурного подхода и интеграцию с внешним BFF или пользовательским интерфейсом. Он не является production-решением, но закладывает основу для дальнейшего развития в сторону промышленной системы.
+## 1. Назначение проекта
 
-## Постановка задачи
+`LLM Copilot MVP` предназначен для поддержки операторов карточной линии в сценариях, где требуется:
 
-При обработке карточных обращений оператор работает в условиях, где критичны точность, последовательность и соблюдение требований безопасности. В подобных сценариях необходимо:
+- собирать обязательные уточнения по обращению;
+- различать типы карточных сценариев;
+- соблюдать ограничения по защите персональных данных и противодействию социальной инженерии;
+- не сообщать клиенту о действиях, которые фактически еще не были выполнены;
+- сохранять связность между диалогом, кейсом, tool execution и audit trail.
 
-- корректно различать тип обращения;
-- не пропускать обязательные уточнения;
-- не выполнять действия без подтверждения;
-- учитывать ограничения, связанные с персональными данными и антифрод-процедурами;
-- сохранять связность между диалогом, кейсом, инструментальными действиями и аудитом.
+Система реализует контролируемый pipeline, который:
 
-## Цели проекта
+- хранит разговоры и сообщения;
+- формирует suggestion для оператора;
+- поднимает релевантные источники из RAG;
+- показывает доступные действия по текущему состоянию сценария;
+- выполняет инструменты через отдельный сервис;
+- сохраняет аудит и объектное состояние.
 
-Проект решает следующие задачи:
+Проект является **MVP/dev-стендом**, предназначенным для разработки, демонстрации и дальнейшего развития. Он не позиционируется как готовая production-система банка.
 
-- хранение истории диалога и связанных артефактов;
-- поиск релевантных фрагментов регламентов и скриптов с использованием RAG;
-- формирование структурированных подсказок оператору;
-- отображение допустимых действий в зависимости от текущего состояния сценария;
-- выполнение подтвержденных инструментальных действий через отдельный сервис;
-- ведение аудита по ключевым операциям и изменениям состояния.
+---
 
-## Основные возможности
+## 2. Основные возможности
 
-На текущем этапе система поддерживает:
+На текущем этапе проект поддерживает:
 
 - ведение диалогов по `conversation_id`;
-- асинхронное формирование copilot-подсказок по `task_id`;
-- хранение и выдачу состояния copilot по диалогу;
-- поиск по документам и индексированному RAG-корпусу;
-- выполнение tool-вызовов через отдельный сервис `mcp_tools`;
+- создание task-based copilot suggestions;
+- хранение и выдачу `copilot state` по разговору;
+- запуск инструментов через отдельный `mcp_tools` сервис;
 - создание кейсов и ведение `audit trail`;
-- разграничение доступа на уровне `conversation`, `case` и `task`;
-- обработку документов форматов `docx`, `pdf`, `txt`;
-- использование seed-корпуса документов для локального запуска и демонстрации.
+- индексацию документов в RAG и поиск по ним;
+- ingest документов в форматах `docx / pdf / txt`;
+- автоматическую индексацию документов после upload;
+- различение источников типов `policy / security / script / procedure`;
+- использование enriched metadata в retrieval;
+- ограничение доступа на уровне `conversation`, `case`, `task`;
+- включение `safe mode` для рискованных входов;
+- единый state engine для `plan / phase / tool gating`;
+- lease/heartbeat/reclaim для worker-задач;
+- streaming `ghost_text` через SSE;
+- расширенный audit с `trace_id`, `prompt_hash`, `policy_version`, `state_before/state_after`, retrieval snapshot и cache info;
+- readiness checks и debug endpoints.
 
-## Архитектура
+---
 
-Проект построен как многокомпонентный backend-контур с разделением ответственности между сервисами:
+## 3. Архитектурная концепция
 
-- `backend` — внешний HTTP API и оркестрация сценариев;
-- `worker` — асинхронная обработка цепочек `analyze -> rag -> draft`;
-- `mcp_tools` — выполнение инструментальных действий;
-- `PostgreSQL` — основное хранилище данных;
-- `Redis` — кэш, статусы задач, временное состояние;
-- `MinIO` — хранение документов;
-- `Kafka` — шина событий и аудит.
+Проект состоит из нескольких сервисов с общей инфраструктурной и контрактной базой:
+
+- `backend` — внешний HTTP API, оркестрация и управление state;
+- `worker` — асинхронный pipeline suggest/analyze/draft;
+- `mcp_tools` — сервис выполнения инструментов;
+- `postgres` — основное состояние и аудит;
+- `redis` — task state, кэш, streaming/meta state;
+- `minio` — хранение документов;
+- `kafka` — event bus.
 
 ### Ключевой принцип
 
-Языковая модель не изменяет фактическое состояние системы напрямую. Изменения, влияющие на обслуживание клиента, фиксируются только после подтвержденного и успешно выполненного `tool_result`. Такой подход позволяет отделить рекомендации модели от фактических действий системы.
+LLM не изменяет фактическое состояние системы напрямую.
 
-### Общая схема
+Модель может предлагать шаги, текст, карточки и объяснения, однако реальное состояние изменяется только после получения фактического `tool_result`.
+
+---
+
+## 4. Схема сервисов
+
+### 4.1 Общая топология
 
 ```mermaid
 flowchart LR
-    UI[Frontend / BFF / Operator UI] --> BE[Backend API]
-    BE --> WRK[Worker]
-    BE --> MCP[MCP Tools]
-    BE --> PG[(PostgreSQL)]
+    UI[Frontend / BFF / Operator UI] -->|HTTP| BE[backend :8080]
+
+    BE --> WRK[worker]
+    BE --> MCP[mcp_tools :8090]
+    BE --> PG[(Postgres)]
     BE --> RD[(Redis)]
     BE --> MN[(MinIO)]
     BE --> KF[(Kafka)]
@@ -79,82 +96,137 @@ flowchart LR
     MCP --> PG
     MCP --> RD
     MCP --> KF
+
+    PG -->|cases / audit / chunks / conversations| BE
+    MN -->|docs| BE
 ```
 
-## Конвейер формирования подсказки
+### 4.2 Pipeline `suggest`
 
-Сценарий формирования подсказки оператору включает следующие этапы:
+```mermaid
+sequenceDiagram
+    participant UI as Frontend / BFF
+    participant BE as backend
+    participant RD as Redis
+    participant WRK as worker
+    participant PG as Postgres
 
-1. получение контекста диалога;
-2. анализ последнего сообщения клиента;
-3. поиск релевантных регламентов через RAG;
-4. генерацию структурированного ответа для UI;
-5. сохранение результата и состояния задачи.
+    UI->>BE: POST /api/v1/copilot/suggest
+    BE->>RD: create task meta
+    BE-->>UI: task_id
 
-Результат подсказки может включать:
+    WRK->>PG: load messages
+    WRK->>RD: check caches
+    WRK->>WRK: moderation + pii redaction
+    WRK->>PG: rag retrieval
+    WRK->>WRK: analyze -> plan -> draft
+    WRK->>RD: persist result/state
+    WRK-->>UI: stream ghost_text via SSE
 
-- `ghost_text`;
-- `quick_cards`;
-- `form_cards`;
-- `sidebar` с текущей фазой, намерением, источниками, инструментами и рисковыми флагами.
+    UI->>BE: GET /api/v1/copilot/suggest/{task_id}
+    BE->>RD: read task status/result
+    BE-->>UI: final DRAFT payload
+```
 
-## Сценарий выполнения инструментов
+### 4.3 Pipeline `tool execution`
 
-Инструментальные действия выполняются только после явного подтверждения оператора. Backend проверяет допустимость действия в текущем состоянии сценария, передает запрос в `mcp_tools`, а затем обновляет состояние и аудит на основании фактического результата.
+```mermaid
+sequenceDiagram
+    participant UI as Frontend / BFF
+    participant BE as backend
+    participant MCP as mcp_tools
+    participant PG as Postgres
+    participant RD as Redis
 
-Примеры поддерживаемых действий:
+    UI->>BE: POST /api/v1/copilot/tools/execute
+    BE->>BE: access check + policy/state check
+    BE->>MCP: tool request
+    MCP->>RD: idempotency check
+    MCP->>PG: create/update domain entity
+    MCP-->>BE: tool_result
+    BE->>PG: audit + deterministic state update
+    BE-->>UI: explain + updated state
+```
 
-- `create_case`
-- `get_case_status`
-- `get_transactions`
-- `block_card`
-- `unblock_card`
-- `reissue_card`
-- `get_card_limits`
-- `set_card_limits`
-- `toggle_online_payments`
+---
 
-## Структура репозитория
+## 5. Структура репозитория
 
 ```text
 .
-├── apps/                      # прикладные компоненты и точки входа
-├── docs/                      # документация и seed-корпус для RAG
-├── libs/                      # общие библиотеки и инфраструктурный код
+├── apps/
+│   ├── backend/
+│   │   └── app/
+│   │       ├── api/v1/routes/
+│   │       └── core/
+│   ├── worker/
+│   └── mcp_tools/
+├── libs/
+│   └── common/
 ├── packages/
-│   └── contracts/             # общие контракты и схемы
-├── services/                  # backend, worker, mcp_tools
-├── shared/                    # общий код и переиспользуемые модули
-├── tests/                     # unit и smoke tests
-├── .env.example               # шаблон переменных окружения
-├── docker-compose.yml         # локальный стенд
-├── Makefile                   # команды управления проектом
-└── requirements.txt
+│   └── contracts/
+├── migrations/
+│   ├── env.py
+│   └── versions/
+├── docs/
+│   └── rag_corpus/
+├── tests/
+├── docker-compose.yml
+├── requirements.txt
+├── Makefile
+├── alembic.ini
+└── .env.example
 ```
 
-## Технологический стек
+Назначение директорий:
 
-- Python
+- `apps/` — исполняемые сервисы;
+- `libs/common/` — общий код;
+- `packages/contracts/` — pydantic-контракты;
+- `migrations/` — управляемая эволюция схемы базы данных;
+- `docs/rag_corpus/` — seed corpus для RAG.
+
+---
+
+## 6. Технологический стек
+
+- Python 3.11+
 - FastAPI
-- PostgreSQL
+- SQLAlchemy 2 + asyncpg
+- PostgreSQL + pgvector
 - Redis
 - MinIO
 - Kafka
-- Docker Compose
-- RAG / embeddings pipeline
-- LLM API integration
+- Alembic
+- Pydantic v2
+- Docker / Docker Compose
 
-## Быстрый старт
+LLM и embeddings поддерживают следующие режимы подключения:
 
-### Требования
+- `stub` — для локальной разработки;
+- `openai_compat` — для реального провайдера;
+- внешний HTTP-адаптер — при необходимости.
 
-Для локального запуска необходимы:
+---
 
-- Docker
-- Docker Compose
-- свободные порты для сервисов из `docker-compose.yml`
+## 7. Быстрый старт
 
-### Запуск
+### 7.1 Требования
+
+Для запуска необходимы:
+
+- Docker + Docker Compose;
+- свободные порты:
+  - `8080`
+  - `8090`
+  - `5432`
+  - `6379`
+  - `9000`
+  - `9001`
+  - `9092`
+- локальный `.env`.
+
+### 7.2 Запуск стека
 
 Linux/macOS:
 
@@ -170,46 +242,152 @@ copy .env.example .env
 docker compose up -d --build
 ```
 
-### Проверка работоспособности
+`docker-compose.yml` содержит отдельный сервис `migrate`, который выполняет `alembic upgrade head` до запуска `backend`, `worker` и `mcp_tools`.
+
+### 7.3 Проверка состояния сервисов
 
 ```bash
 curl http://localhost:8080/health
+curl http://localhost:8080/readiness
 curl http://localhost:8090/health
+curl http://localhost:8090/readiness
 docker compose ps
 ```
 
-Ожидаемый ответ:
+Пример ответа `health`:
 
 ```json
-{"ok": true}
+{"ok":true,"service":"backend"}
 ```
 
-## Пример сценария работы
+Endpoint `readiness` проверяет не только факт запуска процесса, но и доступность его зависимостей.
 
-Базовый сценарий использования:
+---
 
-1. создать диалог;
-2. добавить сообщение клиента;
-3. вызвать `POST /api/v1/copilot/suggest`;
-4. получить `task_id`;
-5. запросить результат по `GET /api/v1/copilot/suggest/{task_id}`;
-6. отобразить подсказки оператору;
-7. при необходимости выполнить подтвержденный tool-вызов;
-8. получить обновленное состояние и запись в аудите.
+## 8. Конфигурация
 
-## Быстрый smoke-test
+Основные переменные окружения в `.env`:
 
-### Заголовки operator-запросов
+- `APP_ENV`
+- `INTERNAL_AUTH_TOKEN`
+- `INTERNAL_AUTH_SIGNING_KEY`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `MINIO_ENDPOINT`
+- `MINIO_ACCESS_KEY`
+- `MINIO_SECRET_KEY`
+- `MINIO_BUCKET`
+- `MINIO_SECURE`
+- `KAFKA_BOOTSTRAP`
+- `KAFKA_ENABLED`
+- `MCP_TOOLS_URL`
+- `LLM_PROVIDER`
+- `LLM_BASE_URL`
+- `LLM_ANALYZE_MODEL`
+- `LLM_DRAFT_MODEL`
+- `LLM_EXPLAIN_MODEL`
+- `LLM_GHOST_MODEL`
+- `LLM_TEMPERATURE`
+- `LLM_MAX_TOKENS`
+- `LLM_API_KEY`
+- `EMBED_PROVIDER`
+- `EMBED_BASE_URL`
+- `EMBED_MODEL`
+- `RAG_SEED_DIR`
 
-Windows CMD:
+Для локальной разработки можно использовать `LLM_PROVIDER=stub`.  
+Для подключения реального провайдера применяется режим `openai_compat`.
 
-```cmd
-set TOKEN=dev-internal-token
-set ROLE=operator
-set AID=op-1
-```
+---
 
-### Загрузить seed-корпус в RAG
+## 9. Данные и volumes
+
+В `docker-compose.yml` используются следующие named volumes:
+
+- `postgres_data`
+- `redis_data`
+- `minio_data`
+
+Следствия:
+
+- `docker compose down` удаляет контейнеры, но сохраняет данные;
+- `docker compose down -v` удаляет контейнеры и volumes, то есть полностью очищает локальное состояние.
+
+---
+
+## 10. Безопасность и модель доверия
+
+### Локальная разработка
+
+Для operator-запросов в локальном dev-режиме можно использовать legacy-заголовки:
+
+- `X-Internal-Auth`
+- `X-Actor-Role`
+- `X-Actor-Id`
+
+### Service-to-service взаимодействие
+
+Внутренние сервисы используют подписанные claims:
+
+- `X-Internal-Claims`
+- `X-Internal-Signature`
+- `X-Request-Id`
+
+Это требуется для:
+
+- ограничения TTL запросов;
+- привязки к `request_id`;
+- усиления внутренней доверенной границы.
+
+### Guardrails
+
+Проект дополнительно:
+
+- маскирует PII до передачи в LLM;
+- различает moderation для input / retrieved chunks / output;
+- блокирует опасные подсказки;
+- не позволяет обойти policy/state engine при выполнении tools;
+- ведет расширенный security-oriented audit.
+
+---
+
+## 11. Seed-корпус RAG
+
+В проекте присутствует стартовый корпус документов в `docs/rag_corpus/`.
+
+Основные типы документов:
+
+- dispute / suspicious transaction;
+- block / lost / stolen;
+- security / anti-social-engineering;
+- status / escalation;
+- operator scripts.
+
+### Возможности retrieval
+
+- enriched metadata:
+  - `doc_code`
+  - `version_label`
+  - `effective_date`
+  - `source_type`
+  - `source_priority`
+  - `section_path`
+  - `chunk_type`
+  - `risk_tags`
+  - `is_mandatory_step`
+- query planner;
+- hybrid retrieval;
+- internal rerank;
+- version-aware scoring;
+- auto-index после upload.
+
+---
+
+## 12. Smoke test
+
+Ниже приведены примеры для локального dev через legacy operator headers.
+
+### 12.1 Загрузка seed corpus
 
 ```bash
 curl -s -X POST "http://localhost:8080/api/v1/docs/bootstrap-seed" \
@@ -218,7 +396,34 @@ curl -s -X POST "http://localhost:8080/api/v1/docs/bootstrap-seed" \
   -H "X-Actor-Id: op-1"
 ```
 
-### Проверить RAG-поиск
+### 12.2 Просмотр списка документов
+
+```bash
+curl -s "http://localhost:8080/api/v1/docs" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1"
+```
+
+### 12.3 Просмотр чанков документа
+
+```bash
+curl -s "http://localhost:8080/api/v1/docs/<DOC_ID>/chunks?limit=20" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1"
+```
+
+### 12.4 Selective reindex
+
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/docs/reindex?doc_id=<DOC_ID>" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1"
+```
+
+### 12.5 Проверка RAG
 
 ```bash
 curl -s -X POST "http://localhost:8080/api/v1/rag/search" \
@@ -229,7 +434,7 @@ curl -s -X POST "http://localhost:8080/api/v1/rag/search" \
   --data '{"query":"клиент сообщил код из SMS и просит заблокировать карту","top_k":5}'
 ```
 
-### Создать разговор
+### 12.6 Создание разговора
 
 ```bash
 curl -s -X POST "http://localhost:8080/api/v1/chat/conversations" \
@@ -238,166 +443,178 @@ curl -s -X POST "http://localhost:8080/api/v1/chat/conversations" \
   -H "X-Actor-Id: op-1"
 ```
 
-### Запустить suggest
+### 12.7 Отправка сообщения
 
-1. создать conversation;
-2. отправить сообщение;
-3. вызвать `POST /api/v1/copilot/suggest`;
-4. получить `task_id`;
-5. читать `GET /api/v1/copilot/suggest/{task_id}`.
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/chat/conversations/<CONVERSATION_ID>/messages" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1" \
+  -H "Content-Type: application/json" \
+  --data '{"actor_role":"client","actor_id":"client-1","content":"Я не совершал эту операцию, карта у меня"}'
+```
 
-### Проверить выполнение инструментов
+### 12.8 Запуск suggest
 
-Базовый happy-path:
-- `create_case`
-- `block_card`
-- `cases?conversation_id=...`
-- `audit?conversation_id=...`
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/copilot/suggest" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1" \
+  -H "Content-Type: application/json" \
+  --data '{"conversation_id":"<CONVERSATION_ID>","max_messages":20}'
+```
 
-## Seed-корпус RAG
+Ответ возвращает `task_id`.
 
-Проект уже содержит стартовый корпус документов:
+### 12.9 Чтение status/result
 
-- `REG-DSP-001` — оспаривание операций;
-- `REG-BLK-002` — блокировка карты;
-- `REG-SEC-003` — ПДн и социнжиниринг;
-- `REG-TRX-004` — отложенные и дублированные списания;
-- `REG-LST-005` — утеря / кража / компрометация;
-- `REG-SUB-006` — подписки и recurring payments;
-- `REG-ESC-007` — антифрод-эскалация;
-- `REG-STS-008` — статусы кейсов и коммуникация;
-- `REG-FBK-009` — fallback при недоступности инструментов;
-- `SCRIPT-OPS-001`, `SCRIPT-OPS-002` — скриптовый слой для draft.
+```bash
+curl -s "http://localhost:8080/api/v1/copilot/suggest/<TASK_ID>" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1"
+```
 
-### Как работает retrieval
+### 12.10 Streaming прогресса
 
-- из документов извлекаются `doc_code`, `source_type`, `version_label`, `effective_date`;
-- служебная шапка не лезет в индекс как полезное знание;
-- `security/policy` получают больший вес, чем `script`;
-- похожие куски не забивают top-k;
-- один и тот же retriever используется и для `/rag/search`, и для worker.
+```bash
+curl -N "http://localhost:8080/api/v1/copilot/suggest/<TASK_ID>/stream" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1"
+```
 
-## Интеграция с frontend и BFF
+### 12.11 Выполнение tool
 
-Проект изначально рассчитан на интеграцию с внешним пользовательским интерфейсом. Backend предоставляет API, на которое может быть навешан как промежуточный BFF-слой, так и полноценный operator UI.
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/copilot/tools/execute" \
+  -H "X-Internal-Auth: dev-internal-token" \
+  -H "X-Actor-Role: operator" \
+  -H "X-Actor-Id: op-1" \
+  -H "Content-Type: application/json" \
+  --data '{
+    "conversation_id":"<CONVERSATION_ID>",
+    "tool":"create_case",
+    "params":{"intent":"SuspiciousTransaction"},
+    "idempotency_key":"tool-001"
+  }'
+```
 
-Рекомендуемая схема интеграции:
+---
 
-- `UI -> BFF -> backend`
+## 13. API для интеграции с frontend
 
-Такой подход позволяет централизовать авторизацию, преобразование контрактов и серверную агрегацию данных. Для локальной разработки допустимо обращаться к backend напрямую, однако в прикладной архитектуре предпочтителен BFF-слой.
-
-### Обязательные заголовки
-
-Для операторских запросов используются следующие заголовки:
-
-- `X-Internal-Auth`
-- `X-Actor-Role`
-- `X-Actor-Id`
-
-### Основные эндпоинты для frontend
-
-#### Диалоги
-
+### Диалоги
 - `POST /api/v1/chat/conversations`
+- `GET /api/v1/chat/conversations/{conversation_id}/messages`
 - `POST /api/v1/chat/conversations/{conversation_id}/messages`
+- `GET /api/v1/chat/stream`
+- `GET /api/v1/chat/ws`
 
-#### Copilot
-
+### Copilot
 - `POST /api/v1/copilot/suggest`
 - `GET /api/v1/copilot/suggest/{task_id}`
+- `GET /api/v1/copilot/suggest/{task_id}/stream`
+- `POST /api/v1/copilot/suggest/{task_id}/cancel`
 - `GET /api/v1/copilot/state?conversation_id=...`
 - `POST /api/v1/copilot/tools/execute`
+- `POST /api/v1/copilot/profile/confirm`
 
-#### Кейсы и аудит
+### Cases
+- `GET /api/v1/cases`
+- `GET /api/v1/cases/{case_id}`
+- `PATCH /api/v1/cases/{case_id}`
+- `GET /api/v1/cases/{case_id}/timeline`
 
-- `GET /api/v1/cases?conversation_id=...`
-- `GET /api/v1/audit?conversation_id=...`
-
-#### Документы и RAG
-
+### Docs / RAG
+- `POST /api/v1/docs/upload`
 - `POST /api/v1/docs/bootstrap-seed`
+- `POST /api/v1/docs/reindex`
 - `GET /api/v1/docs`
+- `GET /api/v1/docs/{doc_id}`
+- `GET /api/v1/docs/{doc_id}/chunks`
 - `POST /api/v1/rag/search`
 
-## Модель отображения интерфейса
+### Audit / debug
+- `GET /api/v1/audit`
+- `GET /api/v1/audit/trace/{trace_id}`
+- `GET /api/v1/audit/trace/{trace_id}/replay`
+- `GET /api/v1/audit/trace/{trace_id}/export`
 
-Минимальный интерфейс оператора может быть построен вокруг следующих блоков.
+---
 
-### Левая панель
+## 14. Рекомендации по frontend-рендерингу
 
-- список диалогов;
-- история сообщений;
+### Левая колонка
+- список разговоров;
+- текущая лента сообщений;
 - поле ввода оператора.
 
-### Центральная панель
-
+### Центральная колонка
 - `ghost_text`;
 - `quick_cards`;
 - `form_cards`;
-- `draft suggestions`.
+- ручная правка сообщения перед отправкой.
 
-### Правая панель
+### Правая колонка
+Рекомендуется рендерить из `sidebar`:
 
-Данные из `sidebar` могут использоваться для отображения:
+- `phase`
+- `intent`
+- `plan.steps`
+- `sources`
+- `tools`
+- `risk_checklist`
+- `danger_flags`
+- `operator_notes`
 
-- текущей фазы сценария;
-- определенного намерения клиента;
-- плана действий;
-- источников, использованных при формировании ответа;
-- доступных инструментов;
-- чек-листа рисков;
-- предупреждающих флагов.
+### Action bar
 
-### Панель действий
+Действия следует строить на основе `sidebar.tools`.
 
-Панель действий должна строиться на основе списка инструментов, полученного от backend. Доступность действий должна определяться сервером, а не клиентской логикой интерфейса.
+Frontend должен учитывать `enabled/reason`, а не определять доступность действий самостоятельно.
 
-## Типовой сценарий работы frontend
+---
 
-### Сценарий suggest
+## 15. Debug и observability
 
-1. оператор отправляет сообщение;
-2. frontend вызывает `POST /api/v1/copilot/suggest`;
-3. backend возвращает `task_id`;
-4. frontend запрашивает `GET /api/v1/copilot/suggest/{task_id}`;
-5. после завершения задачи интерфейс отображает `ghost_text`, `quick_cards`, `form_cards` и `sidebar`.
+### Health / readiness
+- `GET /health`
+- `GET /readiness`
 
-### Сценарий выполнения инструментов во frontend
+`readiness` проверяет зависимости:
 
-1. frontend получает доступные действия из `sidebar.tools`;
-2. пользователь подтверждает запуск инструмента;
-3. frontend вызывает `POST /api/v1/copilot/tools/execute`;
-4. backend возвращает обновленное состояние, пояснение и данные для повторного рендера.
+- backend:
+  - Postgres
+  - Redis
+  - MinIO
+  - Kafka
+- mcp_tools:
+  - Redis
+  - Kafka
 
-## Ограничения безопасности и эксплуатации
+### Replay / export
 
-Проект учитывает ряд ограничений, характерных для банковских сценариев:
+Поддерживается:
 
-- чувствительные действия не выполняются автоматически;
-- права доступа проверяются на уровне объектов и задач;
-- внутренние вызовы отделены от внешнего интерфейса;
-- результаты модели не считаются фактом до подтвержденного действия;
-- аудит фиксирует ключевые события и изменения состояния;
-- структура ответа модели ориентирована на серверную валидацию и предсказуемую интеграцию с UI.
+- просмотр полной цепочки событий по `trace_id`;
+- просмотр `state_before / state_after`;
+- просмотр retrieval snapshot;
+- просмотр cache info;
+- экспорт trace целиком.
 
-## Роли и доступ
+### RAG debug
 
-### `operator`
-Операторский UI и copilot-flow.
+Поддерживается:
 
-### `service`
-Только внутренние service-to-service вызовы.
+- просмотр списка документов;
+- reindex конкретного документа;
+- просмотр чанков документа.
 
-### Объектный уровень доступа
-Проверяется для:
-- `conversation`
-- `case`
-- `task`
+---
 
-Это значит, что оператор не должен видеть чужой `task_id`, даже если кто-то зачем-то решил им поделиться.
-
-## Команды разработки
+## 16. Команды разработки
 
 ```bash
 make up
@@ -405,46 +622,86 @@ make down
 make reset
 make logs
 make ps
+make migrate
+make rebuild
 make test
 make lint
 ```
 
-Если `make` недоступен, можно использовать прямые команды `docker compose` и `pytest`.
+### Локальный запуск тестов без Docker
 
-## Параметры окружения
+Linux/macOS:
 
-Ключевые параметры окружения задаются локально через `.env` на основе `.env.example`.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=packages/contracts/src:. pytest -q
+```
 
-Примеры:
+Windows CMD:
 
-- `INTERNAL_AUTH_TOKEN`
-- `DATABASE_URL`
-- `REDIS_URL`
-- `MINIO_ENDPOINT`
-- `MINIO_ACCESS_KEY`
-- `MINIO_SECRET_KEY`
-- `MINIO_BUCKET`
-- `LLM_PROVIDER`
-- `LLM_BASE_URL`
-- `LLM_API_KEY`
-- `LLM_ANALYZE_MODEL`
-- `LLM_DRAFT_MODEL`
-- `LLM_EXPLAIN_MODEL`
-- `LLM_GHOST_MODEL`
-- `EMBED_PROVIDER`
-- `EMBED_BASE_URL`
-- `EMBED_MODEL`
-- `RAG_SEED_DIR`
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+set PYTHONPATH=packages/contracts/src;.
+pytest -q
+```
 
-## Статус проекта
+### Быстрая проверка синтаксиса
 
-Текущая версия проекта представляет собой backend MVP для демонстрации архитектуры operator copilot в сценариях карточных обращений. Репозиторий может использоваться как:
+```bash
+python -m compileall apps libs packages/contracts/src tests
+```
 
-- учебный проект;
-- демонстрационный стенд;
-- основа для дальнейшей интеграции с frontend/BFF;
-- заготовка для расширения бизнес-логики и сервисного контура.
+---
 
-## Итог
+## 17. Дальнейшее развитие
 
-LLM Copilot для обработки спорных операций по банковским картам — это backend MVP, демонстрирующий подход к построению операторского copilot-сценария с управляемой логикой, RAG по внутренним регламентам, подтверждаемыми инструментальными действиями и полным аудитом ключевых событий.
+Реализовано:
+
+- richer RAG metadata;
+- auto-index;
+- unified state engine;
+- worker hardening;
+- signed claims;
+- redaction hardening;
+- JSONB audit trail;
+- replay/debug toolkit;
+- health/readiness.
+
+Планируется:
+
+- readiness score по кейсу;
+- более содержательный `missing_fields`;
+- итоговое досье;
+- расширение domain layer;
+- дальнейшее развитие аналитики и сценариев.
+
+---
+
+## 18. Что не следует коммитить
+
+Не следует включать в репозиторий и архивы:
+
+- `.env`
+- `.git`
+- `__pycache__`
+- `.pytest_cache`
+- `.DS_Store`
+- дампы
+- временные build artifacts
+
+---
+
+## 19. Итог
+
+`LLM Copilot MVP` представляет собой рабочий backend-контур операторского copilot-а, который позволяет:
+
+- развернуть локальный dev-стенд;
+- интегрировать frontend или BFF;
+- выполнять сценарии через API;
+- тестировать retrieval, tool-driven flow и state machine;
+- отлаживать поведение через trace и audit;
+- развивать продукт без полного пересмотра архитектурного фундамента.

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
-from libs.common.kafka_bus import kafka_bus
 from apps.mcp_tools.app.api.v1.router import router as v1
+from libs.common.kafka_bus import kafka_bus
+from libs.common.observability import collect_mcp_dependencies, summarize_readiness
 
 
 app = FastAPI(title='MCP Tools Server', version='1.0')
@@ -22,4 +24,12 @@ async def _shutdown():
 
 @app.get('/health')
 async def health():
-    return {'ok': True}
+    return {'ok': True, 'service': 'mcp-tools'}
+
+
+@app.get('/readiness')
+async def readiness():
+    summary = summarize_readiness(await collect_mcp_dependencies())
+    if summary['ok']:
+        return summary
+    return JSONResponse(status_code=503, content=summary)

@@ -15,7 +15,7 @@ from apps.backend.app.core.deps import get_db
 from libs.common.db import SessionLocal
 from libs.common.kafka_bus import kafka_bus
 from libs.common.models import Conversation, Message
-from libs.common.security import require_actor
+from libs.common.security import extract_actor_from_headers, require_actor
 from libs.common.config import settings
 
 
@@ -154,17 +154,16 @@ async def ws(ws: WebSocket):
     q = None
     conversation_id = ws.query_params.get('conversation_id') or ''
     try:
-        token = ws.headers.get('x-internal-auth')
-        role = ws.headers.get('x-actor-role')
-        aid = ws.headers.get('x-actor-id')
-        if token != settings.internal_auth_token or not role or not aid:
+        try:
+            actor = extract_actor_from_headers(ws.headers)
+        except HTTPException:
             await ws.close(code=4401)
             return
+
         if not conversation_id:
             await ws.close(code=4400)
             return
 
-        actor = {'role': role, 'id': aid}
         async with SessionLocal() as db:
             try:
                 await require_conversation_access(db, actor, conversation_id)

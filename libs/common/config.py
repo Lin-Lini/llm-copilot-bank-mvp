@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     app_env: str = 'dev'
 
     internal_auth_token: str = 'dev-internal-token'
+    internal_auth_signing_key: str = 'dev-internal-signing-key'
+    internal_auth_ttl_sec: int = 45
+    internal_auth_allow_legacy_token: bool = True
 
     database_url: str = 'postgresql+asyncpg://postgres:postgres@postgres:5432/copilot'
     redis_url: str = 'redis://redis:6379/0'
@@ -24,29 +27,15 @@ class Settings(BaseSettings):
 
     mcp_tools_url: str = 'http://mcp-tools:8090'
 
-    # --- LLM integration ---
-    # URLs for external LLM gateway or adapter. Leave these empty by default. When
-    # populated, worker and backend will call these endpoints instead of the
-    # built‑in stub. Each endpoint corresponds to a specific mode: analyze,
-    # draft, explain or streaming ghost_text.
     llm_analyze_url: str = ''
     llm_draft_url: str = ''
     llm_explain_url: str = ''
     llm_ghost_stream_url: str = ''
 
-    # API key or bearer token for external LLM gateway. By default this is blank.
     llm_api_key: str = ''
-
-    # Provider mode:
-    # - 'stub'           : deterministic local stub (default)
-    # - 'contracts_http' : call custom endpoints from LLM_*_URL that return AnalyzeV1/DraftV1/ExplainV1 JSON
-    # - 'openai_compat'  : call OpenAI-compatible /v1/chat/completions directly (requires models + base_url)
     llm_provider: str = 'stub'
-
-    # OpenAI-compatible base URL, e.g. https://api.openai.com/v1 or http://llm-gateway:8000/v1
     llm_base_url: str = ''
 
-    # Model names for OpenAI-compatible provider
     llm_analyze_model: str = ''
     llm_draft_model: str = ''
     llm_explain_model: str = ''
@@ -55,16 +44,18 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 800
 
-    # --- Embeddings/RAG ---
-    # Provider mode:
-    # - 'stub'          : local deterministic hashing (default)
-    # - 'openai_compat' : OpenAI-compatible /v1/embeddings
     embed_provider: str = 'stub'
     embed_base_url: str = ''
     embed_model: str = ''
 
     rag_dim: int = 64
     rag_seed_dir: str = 'docs/rag_corpus'
+
+    worker_lease_ttl_sec: int = 45
+    worker_heartbeat_interval_sec: int = 10
+    worker_reclaim_batch: int = 20
+    worker_result_ttl_sec: int = 3600
+    worker_cancel_ttl_sec: int = 3600
 
 
 settings = Settings()
