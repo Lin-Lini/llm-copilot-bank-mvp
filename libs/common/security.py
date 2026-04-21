@@ -1,27 +1,49 @@
 from __future__ import annotations
 
-from fastapi import Depends, Header, HTTPException, status
+from typing import Mapping
 
-from libs.common.config import settings
+from fastapi import Depends, HTTPException, Request, status
+
+from libs.common.internal_auth import verify_internal_headers
 
 
 def _bad(msg: str) -> HTTPException:
     return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=msg)
 
 
-async def require_internal_auth(x_internal_auth: str | None = Header(default=None, alias='X-Internal-Auth')):
-    if not x_internal_auth or x_internal_auth != settings.internal_auth_token:
-        raise _bad('invalid internal auth')
+def extract_actor_from_headers(headers: Mapping[str, str]) -> dict[str, str | None]:
+    claims = verify_internal_headers(headers)
+    role = claims.get('actor_role')
+    aid = claims.get('actor_id')
+    if not role or not aid:
+        raise _bad('missing actor identity')
+    return {
+        'role': str(role),
+        'id': str(aid),
+        'issuer': str(claims.get('iss') or ''),
+        'request_id': str(claims.get('request_id') or ''),
+        'origin_role': str(claims.get('origin_actor_role') or '') or None,
+        'origin_id': str(claims.get('origin_actor_id') or '') or None,
+    }
 
 
-async def require_actor(
-    _=Depends(require_internal_auth),
-    x_actor_role: str | None = Header(default=None, alias='X-Actor-Role'),
-    x_actor_id: str | None = Header(default=None, alias='X-Actor-Id'),
-):
-    if not x_actor_role or not x_actor_id:
-        raise _bad('missing actor headers')
-    return {'role': x_actor_role, 'id': x_actor_id}
+async def require_internal_auth(request: Request):
+    return verify_internal_headers(request.headers)
+
+
+async def require_actor(claims=Depends(require_internal_auth)):
+    role = claims.get('actor_role')
+    aid = claims.get('actor_id')
+    if not role or not aid:
+        raise _bad('missing actor identity')
+    return {
+        'role': str(role),
+        'id': str(aid),
+        'issuer': str(claims.get('iss') or ''),
+        'request_id': str(claims.get('request_id') or ''),
+        'origin_role': str(claims.get('origin_actor_role') or '') or None,
+        'origin_id': str(claims.get('origin_actor_id') or '') or None,
+    }
 
 
 async def require_operator(actor=Depends(require_actor)):

@@ -3,28 +3,46 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import socket
+import time
 import traceback
+from contextlib import suppress
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from contracts.schemas import AnalyzeV1, DraftV1, Intent, Phase, RiskLevel, ToolName
+from contracts.schemas import AnalyzeV1, DraftV1, Intent, Phase, RiskLevel, SourceOut
 from libs.common import llm_stub
+from libs.common.audit_store import add_audit_event
 from libs.common.config import settings
 from libs.common.db import SessionLocal, init_db
 from libs.common.kafka_bus import kafka_bus
 from libs.common.llm_client import analyze as llm_analyze, draft as llm_draft, stream_ghost
-from libs.common.models import AuditEvent, Message
-from libs.common.moderator import moderate_input, moderate_output, moderation_mode
+from libs.common.models import Message
+from libs.common.moderator import moderate_input, moderate_output, moderate_retrieved, moderation_mode
 from libs.common.pii import redact
-from libs.common.plan_utils import reduce_plan_after_analyze
-from libs.common.policy import allowed_tools, build_plan
+from libs.common.policy_meta import POLICY_VERSION, make_prompt_hash
 from libs.common.rag_search import hybrid_search
 from libs.common.redis_client import get_redis
+from libs.common.state_engine import build_plan, phase_from_plan, reduce_plan_after_analyze, resolve_tools
+
+
+_TERMINAL_TASK_STATUSES = {'succeeded', 'failed', 'canceled'}
+_RUNNING_INDEX_KEY = 'copilot:tasks:running'
+_QUEUE_NAME = 'copilot:queue:suggest'
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _epoch() -> int:
+    return int(time.time())
+
+
+def _worker_id() -> str:
+    return f'{socket.gethostname()}:{os.getpid()}'
 
 
 def _task_key(task_id: str) -> str:
@@ -37,6 +55,10 @@ def _task_result_key(task_id: str) -> str:
 
 def _task_cancel_key(task_id: str) -> str:
     return f'copilot:task:{task_id}:cancel'
+
+
+def _task_lease_key(task_id: str) -> str:
+    return f'copilot:task:{task_id}:lease'
 
 
 def _state_key(conversation_id: str) -> str:
@@ -60,6 +82,167 @@ def _rag_cache_key(redacted_history: str) -> str:
     return f'copilot:cache:rag:{h}'
 
 
+def _lease_deadline_ts() -> int:
+    return _epoch() + int(settings.worker_lease_ttl_sec)
+
+
+async def _load_meta(r, task_id: str) -> dict | None:
+    raw = await r.get(_task_key(task_id))
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+async def _store_meta(r, task_id: str, meta: dict) -> None:
+    await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
+
+
+async def _publish_status(r, task_id: str, meta: dict) -> None:
+    await publish(r, task_id, 'status', meta)
+
+
+async def _set_status(
+    r,
+    task_id: str,
+    *,
+    status: str,
+    error: str | None = None,
+    extra: dict | None = None,
+) -> dict | None:
+    meta = await _load_meta(r, task_id)
+    if not meta:
+        return None
+    meta['status'] = status
+    meta['updated_at'] = _now()
+    if error is not None:
+        meta['error'] = error
+    if extra:
+        meta.update(extra)
+    await _store_meta(r, task_id, meta)
+    await _publish_status(r, task_id, meta)
+    return meta
+
+
+async def _is_canceled(r, task_id: str) -> bool:
+    return bool(await r.get(_task_cancel_key(task_id)))
+
+
+async def _claim_task(r, task_id: str, worker_id: str) -> dict | None:
+    meta = await _load_meta(r, task_id)
+    if not meta:
+        return None
+    if meta.get('status') in _TERMINAL_TASK_STATUSES:
+        return None
+
+    lease_key = _task_lease_key(task_id)
+    owner = await r.get(lease_key)
+    if owner and owner != worker_id:
+        return None
+    if not owner:
+        ok = await r.set(lease_key, worker_id, ex=int(settings.worker_lease_ttl_sec), nx=True)
+        if not ok:
+            return None
+    else:
+        await r.expire(lease_key, int(settings.worker_lease_ttl_sec))
+
+    deadline = _lease_deadline_ts()
+    meta.update(
+        {
+            'status': 'running',
+            'updated_at': _now(),
+            'lease_owner': worker_id,
+            'lease_expires_at': deadline,
+            'heartbeat_at': _now(),
+        }
+    )
+    await _store_meta(r, task_id, meta)
+    await r.zadd(_RUNNING_INDEX_KEY, {task_id: deadline})
+    return meta
+
+
+async def _release_task(r, task_id: str, worker_id: str) -> None:
+    lease_key = _task_lease_key(task_id)
+    owner = await r.get(lease_key)
+    if owner == worker_id:
+        await r.delete(lease_key)
+    await r.zrem(_RUNNING_INDEX_KEY, task_id)
+
+
+async def _heartbeat_loop(r, task_id: str, worker_id: str, stop_event: asyncio.Event) -> None:
+    interval = max(1, int(settings.worker_heartbeat_interval_sec))
+    ttl = max(interval + 1, int(settings.worker_lease_ttl_sec))
+
+    while not stop_event.is_set():
+        await asyncio.sleep(interval)
+        if stop_event.is_set():
+            return
+
+        owner = await r.get(_task_lease_key(task_id))
+        if owner != worker_id:
+            return
+
+        await r.expire(_task_lease_key(task_id), ttl)
+        meta = await _load_meta(r, task_id)
+        if not meta or meta.get('status') != 'running':
+            return
+
+        deadline = _epoch() + ttl
+        meta['heartbeat_at'] = _now()
+        meta['updated_at'] = _now()
+        meta['lease_owner'] = worker_id
+        meta['lease_expires_at'] = deadline
+        await _store_meta(r, task_id, meta)
+        await r.zadd(_RUNNING_INDEX_KEY, {task_id: deadline})
+
+
+async def _reclaim_expired_tasks(r) -> None:
+    now = _epoch()
+    expired = await r.zrangebyscore(
+        _RUNNING_INDEX_KEY,
+        min=0,
+        max=now,
+        start=0,
+        num=int(settings.worker_reclaim_batch),
+    )
+
+    for task_id in expired:
+        if not task_id:
+            continue
+
+        owner = await r.get(_task_lease_key(task_id))
+        if owner:
+            await r.zadd(_RUNNING_INDEX_KEY, {task_id: _lease_deadline_ts()})
+            continue
+
+        meta = await _load_meta(r, task_id)
+        if not meta:
+            await r.zrem(_RUNNING_INDEX_KEY, task_id)
+            continue
+
+        if meta.get('status') != 'running':
+            await r.zrem(_RUNNING_INDEX_KEY, task_id)
+            continue
+
+        if await _is_canceled(r, task_id):
+            meta['status'] = 'canceled'
+            meta['updated_at'] = _now()
+            meta['reclaimed_at'] = _now()
+            await _store_meta(r, task_id, meta)
+            await r.zrem(_RUNNING_INDEX_KEY, task_id)
+            continue
+
+        meta['status'] = 'queued'
+        meta['updated_at'] = _now()
+        meta['error'] = None
+        meta['reclaimed_at'] = _now()
+        meta['requeue_count'] = int(meta.get('requeue_count') or 0) + 1
+        meta.pop('lease_owner', None)
+        meta.pop('lease_expires_at', None)
+        await _store_meta(r, task_id, meta)
+        await r.zrem(_RUNNING_INDEX_KEY, task_id)
+        await r.rpush(_QUEUE_NAME, task_id)
+
+
 async def audit(
     db,
     *,
@@ -70,30 +253,27 @@ async def audit(
     payload: dict,
     conversation_id: str | None = None,
     case_id: str | None = None,
+    retrieval_snapshot: list[dict] | None = None,
+    state_before: dict | None = None,
+    state_after: dict | None = None,
+    prompt_hash: str | None = None,
+    cache_info: dict | None = None,
 ):
-    ev = AuditEvent(
+    await add_audit_event(
+        db,
         trace_id=trace_id,
         actor_role=actor_role,
         actor_id=actor_id,
+        event_type=event_type,
+        payload=payload,
         conversation_id=conversation_id,
         case_id=case_id,
-        event_type=event_type,
-        payload=json.dumps(payload, ensure_ascii=False),
-    )
-    db.add(ev)
-    await db.commit()
-
-    await kafka_bus.publish(
-        'copilot.audit.v1',
-        {
-            'trace_id': trace_id,
-            'actor_role': actor_role,
-            'actor_id': actor_id,
-            'conversation_id': conversation_id,
-            'case_id': case_id,
-            'event_type': event_type,
-            'payload': payload,
-        },
+        retrieval_snapshot=retrieval_snapshot,
+        state_before=state_before,
+        state_after=state_after,
+        prompt_hash=prompt_hash,
+        policy_version=POLICY_VERSION,
+        cache_info=cache_info,
     )
 
 
@@ -101,7 +281,7 @@ async def rag_search(db, query: str, top_k: int = 5) -> list[dict]:
     return await hybrid_search(db, query, top_k=top_k)
 
 
-async def publish(r, task_id: str, event: str, data):
+async def publish(r, task_id: str, event: str, data) -> None:
     await r.publish(_stream_chan(task_id), json.dumps({'event': event, 'data': data}, ensure_ascii=False))
 
 
@@ -126,13 +306,14 @@ def _safe_draft(flags: list[dict], plan) -> DraftV1:
         risk_checklist=llm_stub.analyze('мошенническая операция').risk_checklist,
         analytics_tags=['safe_mode', flag_text],
     )
-    tools_ui = allowed_tools(Intent.SuspiciousTransaction, Phase.Collect)
+    tools_ui = resolve_tools(Intent.SuspiciousTransaction, Phase.Collect)
     d = llm_stub.draft(an, plan, tools_ui, [])
     return d.model_copy(
         update={
             'ghost_text': 'Нужен безопасный режим. Не запрашивайте коды из SMS/Push, ПИН, CVV/CVC и не предлагайте устанавливать приложения удаленного доступа. Сначала уточните только безопасные детали операции: карта у клиента, сумма и время.',
         }
     )
+
 
 def _stabilize_draft_ghost(an_obj: dict, tools_ui: list, d_obj: dict) -> dict:
     text = (d_obj.get('ghost_text') or '').strip()
@@ -157,7 +338,7 @@ def _stabilize_draft_ghost(an_obj: dict, tools_ui: list, d_obj: dict) -> dict:
         ]
     )
 
-    block_tool = next((t for t in tools_ui if t.tool == ToolName.block_card), None)
+    block_tool = next((t for t in tools_ui if t.tool.value == 'block_card'), None)
     if not premature_block_claim or block_tool is None:
         return d_obj
 
@@ -174,6 +355,7 @@ def _stabilize_draft_ghost(an_obj: dict, tools_ui: list, d_obj: dict) -> dict:
 
     d_obj['ghost_text'] = safe_text
     return d_obj
+
 
 async def _run_analyze(redacted: str, *, safe_mode: str, cached_a: str | None):
     if cached_a:
@@ -197,22 +379,19 @@ async def _run_draft(
     cached_d: str | None,
 ):
     if cached_d:
-        return json.loads(cached_d), True
+        return json.loads(cached_d), True, {'ok': True, 'flags': []}
 
     an_model = AnalyzeV1.model_validate(an_obj)
     if safe_mode == 'block':
         d = _safe_draft([], plan)
     elif safe_mode == 'warn':
-        src_models = []
-        d = llm_stub.draft(an_model, plan, tools_ui, src_models)
+        d = llm_stub.draft(an_model, plan, tools_ui, [])
         d = d.model_copy(
             update={
                 'ghost_text': 'Нужен безопасный режим. Не запрашивайте коды из SMS/Push, ПИН, CVV/CVC и не предлагайте удаленный доступ. Уточните только безопасные детали операции и затем переходите к следующему действию.'
             }
         )
     else:
-        from contracts.schemas import SourceOut
-
         src_models = [SourceOut.model_validate(s) for s in sources]
         d = await llm_draft(an_model, plan, tools_ui, src_models, history=redacted)
 
@@ -220,28 +399,28 @@ async def _run_draft(
     return d.model_dump(), False, mout
 
 
-async def run_task(task_id: str):
+async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = None):
     r = get_redis()
-    raw = await r.get(_task_key(task_id))
-    if not raw:
+    meta = claimed_meta or await _claim_task(r, task_id, worker_id)
+    if not meta:
         return
-    meta = json.loads(raw)
 
-    if await r.get(_task_cancel_key(task_id)):
-        meta['status'] = 'canceled'
-        meta['updated_at'] = _now()
-        await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
-        await publish(r, task_id, 'status', meta)
+    if await _is_canceled(r, task_id):
+        await _set_status(r, task_id, status='canceled')
+        await _release_task(r, task_id, worker_id)
         return
+
+    await _publish_status(r, task_id, meta)
 
     conv_id = meta['conversation_id']
     trace_id = meta['trace_id']
     actor_id = meta.get('actor_id') or 'op'
 
-    meta['status'] = 'running'
-    meta['updated_at'] = _now()
-    await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
-    await publish(r, task_id, 'status', meta)
+    prev_state_raw = await r.get(_state_key(conv_id))
+    state_before = json.loads(prev_state_raw) if prev_state_raw else None
+
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(r, task_id, worker_id, heartbeat_stop))
 
     async with SessionLocal() as db:
         try:
@@ -307,7 +486,7 @@ async def run_task(task_id: str):
                     payload={'mode': safe_mode, 'history_trimmed': True},
                 )
 
-            if await r.get(_task_cancel_key(task_id)):
+            if await _is_canceled(r, task_id):
                 raise RuntimeError('canceled')
 
             akey = _analyze_cache_key(conv_id, last_id)
@@ -327,6 +506,7 @@ async def run_task(task_id: str):
 
             await publish(r, task_id, 'progress', {'step': 'analyze', 'pct': 0.35})
 
+            rag_cached = False
             sources: list[dict] = []
             if safe_mode == 'ok':
                 rkey = _rag_cache_key(redacted)
@@ -342,6 +522,7 @@ async def run_task(task_id: str):
                         payload={'kind': 'rag'},
                     )
                     sources = json.loads(cached_sources)
+                    rag_cached = True
                 else:
                     await audit(
                         db,
@@ -364,6 +545,48 @@ async def run_task(task_id: str):
                         rag_q = rag_q or redacted
                     sources = await rag_search(db, rag_q, top_k=5)
                     await r.set(rkey, json.dumps(sources, ensure_ascii=False), ex=600)
+                    rag_cached = False
+
+                if sources:
+                    safe_sources: list[dict] = []
+                    dropped_sources: list[dict] = []
+
+                    for src in sources:
+                        retrieval_text = '\n'.join(
+                            [
+                                str(src.get('title') or ''),
+                                str(src.get('section') or ''),
+                                str(src.get('quote') or ''),
+                            ]
+                        )
+                        rmod = moderate_retrieved(retrieval_text)
+                        if rmod['ok']:
+                            safe_sources.append(src)
+                        else:
+                            dropped_sources.append(
+                                {
+                                    'doc_id': src.get('doc_id'),
+                                    'title': src.get('title'),
+                                    'section': src.get('section'),
+                                    'flags': rmod['flags'],
+                                }
+                            )
+
+                    sources = safe_sources
+
+                    if dropped_sources:
+                        await audit(
+                            db,
+                            trace_id=trace_id,
+                            actor_role='operator',
+                            actor_id=actor_id,
+                            conversation_id=conv_id,
+                            event_type='retrieval_guardrails',
+                            payload={
+                                'dropped_count': len(dropped_sources),
+                                'dropped': dropped_sources[:10],
+                            },
+                        )
             else:
                 await audit(
                     db,
@@ -377,47 +600,64 @@ async def run_task(task_id: str):
 
             await publish(r, task_id, 'progress', {'step': 'rag', 'pct': 0.55})
 
-            intent = an_obj['intent']
-            phase = an_obj['phase']
-            plan = build_plan(Intent(intent))
+            intent = Intent(an_obj['intent'])
+            plan = build_plan(intent)
             try:
                 an_model = AnalyzeV1.model_validate(an_obj)
                 plan = reduce_plan_after_analyze(plan, an_model)
             except Exception:
                 pass
 
-            tools_ui = allowed_tools(Intent(intent), Phase(phase))
+            resolved_phase = phase_from_plan(plan)
             missing_fields = an_obj.get('missing_fields') or []
-            patched_tools = []
-            for _t in tools_ui:
-                t = _t
+            tools_ui = resolve_tools(
+                intent,
+                resolved_phase,
+                missing_fields=missing_fields,
+                safe_mode=safe_mode,
+            )
 
-                if t.tool == ToolName.get_transactions and any(
-                    mf in ['card_in_possession', 'txn_amount_confirm', 'txn_datetime_confirm'] for mf in missing_fields
-                ):
-                    t = t.model_copy(update={'enabled': False, 'reason': 'Нужно уточнить наличие карты, сумму и время операции.'})
+            suggest_prompt_hash = make_prompt_hash(
+                {
+                    'conversation_id': conv_id,
+                    'last_message_id': last_id,
+                    'safe_mode': safe_mode,
+                    'history': redacted,
+                    'intent': an_obj.get('intent'),
+                    'phase': resolved_phase.value,
+                    'missing_fields': missing_fields,
+                    'tools': [t.model_dump() for t in tools_ui],
+                }
+            )
 
-                if t.tool == ToolName.block_card:
-                    confirmed_from_state = 'customer_confirm_block' not in missing_fields
-                    high_risk_intent = Intent(intent) in {Intent.BlockCard, Intent.LostStolen}
-
-                    if confirmed_from_state or high_risk_intent:
-                        reason = 'Подтверждение клиента получено.'
-                        if high_risk_intent and not confirmed_from_state:
-                            reason = 'Сценарий повышенного риска допускает блокировку.'
-                        t = t.model_copy(update={'enabled': True, 'reason': reason})
-                    else:
-                        t = t.model_copy(update={'enabled': False, 'reason': 'Нужно подтверждение клиента.'})
-
-                if safe_mode != 'ok' and t.tool != ToolName.create_case:
-                    t = t.model_copy(update={'enabled': False, 'reason': 'В safe mode доступны только безопасные действия.'})
-
-                patched_tools.append(t)
-
-            tools_ui = patched_tools
+            await audit(
+                db,
+                trace_id=trace_id,
+                actor_role='operator',
+                actor_id=actor_id,
+                conversation_id=conv_id,
+                event_type='suggest_context',
+                payload={
+                    'task_id': task_id,
+                    'safe_mode': safe_mode,
+                    'intent': intent.value,
+                    'phase': resolved_phase.value,
+                    'missing_fields': missing_fields,
+                    'sources_count': len(sources),
+                },
+                retrieval_snapshot=sources,
+                state_before=state_before,
+                prompt_hash=suggest_prompt_hash,
+                cache_info={
+                    'analyze_cached': analyze_cached,
+                    'rag_cached': rag_cached,
+                },
+            )
 
             dkey = _draft_cache_key(conv_id, last_id)
             cached_d = await r.get(dkey)
+            draft_cached = bool(cached_d)
+
             if cached_d:
                 d_obj = json.loads(cached_d)
                 await audit(
@@ -430,7 +670,7 @@ async def run_task(task_id: str):
                     payload={'kind': 'draft'},
                 )
             else:
-                result = await _run_draft(
+                d_obj, _, mout = await _run_draft(
                     redacted=redacted,
                     safe_mode=safe_mode,
                     an_obj=an_obj,
@@ -439,7 +679,6 @@ async def run_task(task_id: str):
                     sources=sources,
                     cached_d=None,
                 )
-                d_obj, _, mout = result
                 await audit(
                     db,
                     trace_id=trace_id,
@@ -465,29 +704,46 @@ async def run_task(task_id: str):
             await publish(r, task_id, 'progress', {'step': 'draft', 'pct': 0.75})
 
             streamed = False
+            streamed_buf = ''
+            streamed_any = False
+            src_models = [SourceOut.model_validate(s) for s in sources]
+
             if safe_mode == 'ok':
                 try:
                     an_model = AnalyzeV1.model_validate(an_obj)
-                    full_ghost = ''
-                    async for delta in stream_ghost(an_model, plan, tools_ui, history=redacted):
-                        if await r.get(_task_cancel_key(task_id)):
+                    async for delta in stream_ghost(
+                        an_model,
+                        plan,
+                        tools_ui,
+                        history=redacted,
+                        sources=src_models,
+                    ):
+                        if await _is_canceled(r, task_id):
                             raise RuntimeError('canceled')
-                        full_ghost += delta
+                        if not delta:
+                            continue
+                        streamed_buf += delta
+                        streamed_any = True
+                        await publish(r, task_id, 'ghost_text', {'delta': delta, 'full': streamed_buf})
 
-                    if full_ghost:
-                        d_obj['ghost_text'] = full_ghost
+                    if streamed_any:
+                        d_obj['ghost_text'] = streamed_buf
                         d_obj = _stabilize_draft_ghost(an_obj, tools_ui, d_obj)
-
-                        safe_full = d_obj.get('ghost_text', '') or ''
-                        buf = ''
-                        for i in range(0, len(safe_full), 40):
-                            if await r.get(_task_cancel_key(task_id)):
-                                raise RuntimeError('canceled')
-                            chunk = safe_full[i:i + 40]
-                            buf += chunk
-                            await publish(r, task_id, 'ghost_text', {'delta': chunk, 'full': buf})
-
-                    streamed = True
+                        mout_stream = moderate_output(d_obj.get('ghost_text', '') or '')
+                        await audit(
+                            db,
+                            trace_id=trace_id,
+                            actor_role='operator',
+                            actor_id=actor_id,
+                            conversation_id=conv_id,
+                            event_type='moderation_output_stream',
+                            payload=mout_stream,
+                        )
+                        if not mout_stream['ok']:
+                            d_obj['ghost_text'] = 'Понял. Уточните только безопасные детали операции. Мы не запрашиваем коды из SMS/Push, ПИН, CVV/CVC и не предлагаем удаленный доступ.'
+                        if d_obj.get('ghost_text', '') != streamed_buf:
+                            await publish(r, task_id, 'ghost_text_final', {'full': d_obj['ghost_text']})
+                        streamed = True
                 except Exception:
                     streamed = False
 
@@ -497,30 +753,56 @@ async def run_task(task_id: str):
                 ghost = d_obj.get('ghost_text', '') or ''
                 buf = ''
                 for i in range(0, len(ghost), 40):
-                    if await r.get(_task_cancel_key(task_id)):
+                    if await _is_canceled(r, task_id):
                         raise RuntimeError('canceled')
                     chunk = ghost[i:i + 40]
                     buf += chunk
                     await publish(r, task_id, 'ghost_text', {'delta': chunk, 'full': buf})
-                    await asyncio.sleep(0.05)
 
             state = {
                 'conversation_id': conv_id,
-                'intent': an_obj['intent'],
-                'phase': an_obj['phase'],
+                'intent': intent.value,
+                'phase': resolved_phase.value,
                 'plan': plan.model_dump(),
                 'last_analyze': an_obj,
                 'last_draft': d_obj,
             }
-            await r.set(_state_key(conv_id), json.dumps(state, ensure_ascii=False))
+            await r.set(_state_key(conv_id), json.dumps(state, ensure_ascii=False), ex=86400)
+
+            await audit(
+                db,
+                trace_id=trace_id,
+                actor_role='operator',
+                actor_id=actor_id,
+                conversation_id=conv_id,
+                event_type='state_persisted',
+                payload={
+                    'task_id': task_id,
+                    'intent': intent.value,
+                    'phase': resolved_phase.value,
+                },
+                state_before=state_before,
+                state_after=state,
+                prompt_hash=suggest_prompt_hash,
+                cache_info={
+                    'analyze_cached': analyze_cached,
+                    'rag_cached': rag_cached,
+                    'draft_cached': draft_cached,
+                },
+            )
 
             await publish(r, task_id, 'result', d_obj)
-
-            meta['status'] = 'succeeded'
-            meta['updated_at'] = _now()
-            await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
-            await r.set(_task_result_key(task_id), json.dumps(d_obj, ensure_ascii=False), ex=3600)
-            await publish(r, task_id, 'status', meta)
+            meta = await _set_status(
+                r,
+                task_id,
+                status='succeeded',
+                extra={'error': None, 'completed_at': _now()},
+            ) or meta
+            await r.set(
+                _task_result_key(task_id),
+                json.dumps(d_obj, ensure_ascii=False),
+                ex=int(settings.worker_result_ttl_sec),
+            )
 
             await audit(
                 db,
@@ -530,6 +812,16 @@ async def run_task(task_id: str):
                 conversation_id=conv_id,
                 event_type='suggest_ready',
                 payload={'task_id': task_id, 'sources_count': len(sources), 'mode': safe_mode},
+                retrieval_snapshot=sources,
+                state_before=state_before,
+                state_after=state,
+                prompt_hash=suggest_prompt_hash,
+                cache_info={
+                    'analyze_cached': analyze_cached,
+                    'rag_cached': rag_cached,
+                    'draft_cached': draft_cached,
+                    'streamed': streamed,
+                },
             )
             await kafka_bus.publish(
                 'copilot.suggest.v1',
@@ -538,10 +830,7 @@ async def run_task(task_id: str):
 
         except RuntimeError as e:
             if str(e) == 'canceled':
-                meta['status'] = 'canceled'
-                meta['updated_at'] = _now()
-                await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
-                await publish(r, task_id, 'status', meta)
+                await _set_status(r, task_id, status='canceled')
                 await audit(
                     db,
                     trace_id=trace_id,
@@ -550,16 +839,13 @@ async def run_task(task_id: str):
                     conversation_id=conv_id,
                     event_type='suggest_canceled',
                     payload={'task_id': task_id},
+                    state_before=state_before,
                 )
                 return
             raise
         except Exception:
             err = traceback.format_exc(limit=6)
-            meta['status'] = 'failed'
-            meta['updated_at'] = _now()
-            meta['error'] = err
-            await r.set(_task_key(task_id), json.dumps(meta, ensure_ascii=False))
-            await publish(r, task_id, 'status', meta)
+            await _set_status(r, task_id, status='failed', error=err)
             await audit(
                 db,
                 trace_id=trace_id,
@@ -568,24 +854,37 @@ async def run_task(task_id: str):
                 conversation_id=conv_id,
                 event_type='suggest_failed',
                 payload={'task_id': task_id, 'error': err},
+                state_before=state_before,
             )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat_task
+            await _release_task(r, task_id, worker_id)
 
 
 async def main():
     await init_db()
 
-    queue_name = 'copilot:queue:suggest'
     r = get_redis()
+    worker_id = _worker_id()
 
     while True:
-        item = await r.blpop(queue_name, timeout=1)
+        await _reclaim_expired_tasks(r)
+
+        item = await r.blpop(_QUEUE_NAME, timeout=1)
         if not item:
             await asyncio.sleep(0.1)
             continue
         _, task_id = item
         if isinstance(task_id, bytes):
             task_id = task_id.decode('utf-8', errors='ignore')
-        await run_task(str(task_id))
+
+        claimed_meta = await _claim_task(r, str(task_id), worker_id)
+        if not claimed_meta:
+            continue
+        await run_task(str(task_id), worker_id=worker_id, claimed_meta=claimed_meta)
 
 
 if __name__ == '__main__':

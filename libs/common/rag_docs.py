@@ -44,8 +44,8 @@ def _line_value(text: str, label: str) -> str:
 def infer_source_type(title: str, doc_code: str) -> tuple[str, float]:
     t = f'{doc_code} {title}'.lower()
     if doc_code.startswith('SCRIPT-'):
-        return 'script', 0.9
-    if 'пдн' in t or 'социнжинир' in t or 'безопас' in t:
+        return 'script', 0.92
+    if 'пдн' in t or 'социнжинир' in t or 'безопас' in t or 'мошен' in t:
         return 'security', 1.18
     if 'fallback' in t or 'недоступности инструментов' in t:
         return 'fallback', 1.05
@@ -77,6 +77,15 @@ IGNORE_BLOCK_PATTERNS = [
     re.compile(r'^id\s*:', re.IGNORECASE),
     re.compile(r'^версия\s*:', re.IGNORECASE),
     re.compile(r'^дата\s*:', re.IGNORECASE),
+]
+
+
+_RISK_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ('security', ('cvv', 'cvc', 'пин', 'pin', 'sms', 'push', 'код', 'пдн', 'паспорт', 'персональн', 'секрет')),
+    ('fraud', ('мошен', 'социнж', 'удален', 'удалён', 'remote', 'скам')),
+    ('status', ('sla', 'статус', 'эскалац', 'срок', 'ожидание')),
+    ('dispute', ('оспар', 'диспут', 'чарджбэк', 'спорн', 'списани')),
+    ('card_ops', ('блокиров', 'разблокиров', 'перевыпуск', 'лимит', 'онлайн-платеж', 'онлайн платеж')),
 ]
 
 
@@ -148,6 +157,42 @@ def is_frontmatter_block(section: str, text: str) -> bool:
     return False
 
 
+def infer_chunk_type(section: str, text: str) -> str:
+    sec = (section or '').lower()
+    low = (text or '').strip().lower()
+
+    if '|' in text and '\n' in text:
+        return 'table'
+    if 'чеклист' in sec or 'чеклист' in low:
+        return 'checklist'
+    if 'предупреждение' in sec or 'внимание' in low or 'запрещено' in low or 'не запрашива' in low:
+        return 'warning'
+    if re.match(r'^\s*(\d+[\.\)]|[-•])\s+', text):
+        return 'step'
+    if low.count('\n- ') >= 1 or low.count('\n•') >= 1:
+        return 'checklist'
+    if 'если' in low and ('то ' in low or 'иначе' in low):
+        return 'condition'
+    return 'paragraph'
+
+
+def infer_risk_tags(section: str, text: str) -> str:
+    hay = f'{section}\n{text}'.lower()
+    tags: list[str] = []
+    for tag, parts in _RISK_RULES:
+        if any(part in hay for part in parts):
+            tags.append(tag)
+    return ','.join(sorted(set(tags)))
+
+
+def is_mandatory_step(section: str, text: str, chunk_type: str | None = None) -> bool:
+    low = f'{section}\n{text}'.lower()
+    if chunk_type in {'warning', 'checklist'}:
+        return True
+    markers = ('обязательно', 'должен', 'должна', 'необходимо', 'требуется', 'запрещено', 'нельзя')
+    return any(marker in low for marker in markers)
+
+
 def clean_blocks(blocks: Iterable[dict[str, str]], meta: RagDocMeta) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for block in blocks:
@@ -159,7 +204,20 @@ def clean_blocks(blocks: Iterable[dict[str, str]], meta: RagDocMeta) -> list[dic
             continue
         if any(p.match(text) for p in IGNORE_BLOCK_PATTERNS):
             continue
-        out.append({'section': section, 'text': text})
+
+        chunk_type = infer_chunk_type(section, text)
+        risk_tags = infer_risk_tags(section, text)
+
+        out.append(
+            {
+                'section': section,
+                'section_path': section,
+                'text': text,
+                'chunk_type': chunk_type,
+                'risk_tags': risk_tags,
+                'is_mandatory_step': '1' if is_mandatory_step(section, text, chunk_type) else '0',
+            }
+        )
     return out
 
 

@@ -13,7 +13,7 @@ from libs.common.config import settings
 from libs.common.kafka_bus import kafka_bus
 from libs.common.redis_client import get_redis
 from libs.common.security import require_operator
-
+from libs.common.internal_auth import build_internal_headers
 
 router = APIRouter(prefix='/tools', tags=['tools'])
 
@@ -37,14 +37,14 @@ async def _backend_post(path: str, actor: dict, trace_id: str, json_body: dict) 
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.post(
             f'http://backend:8080{path}',
-            headers={
-                'X-Internal-Auth': settings.internal_auth_token,
-                'X-Actor-Role': 'service',
-                'X-Actor-Id': 'mcp-tools',
-                'X-Origin-Actor-Role': actor['role'],
-                'X-Origin-Actor-Id': actor['id'],
-                'X-Request-Id': trace_id,
-            },
+            headers=build_internal_headers(
+                actor_role='service',
+                actor_id='mcp-tools',
+                request_id=trace_id,
+                issuer='mcp-tools',
+                origin_actor_role=actor['role'],
+                origin_actor_id=actor['id'],
+            ),
             json=json_body,
         )
     if r.status_code != 200:
@@ -56,14 +56,14 @@ async def _backend_get(path: str, actor: dict, trace_id: str, params: dict) -> d
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(
             f'http://backend:8080{path}',
-            headers={
-                'X-Internal-Auth': settings.internal_auth_token,
-                'X-Actor-Role': 'service',
-                'X-Actor-Id': 'mcp-tools',
-                'X-Origin-Actor-Role': actor['role'],
-                'X-Origin-Actor-Id': actor['id'],
-                'X-Request-Id': trace_id,
-            },
+            headers=build_internal_headers(
+                actor_role='service',
+                actor_id='mcp-tools',
+                request_id=trace_id,
+                issuer='mcp-tools',
+                origin_actor_role=actor['role'],
+                origin_actor_id=actor['id'],
+            ),
             params=params,
         )
     if r.status_code != 200:

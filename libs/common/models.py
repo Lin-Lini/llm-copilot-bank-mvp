@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from libs.common.config import settings
 
@@ -63,6 +64,7 @@ class CaseTimeline(Base):
     case_id: Mapped[str] = mapped_column(String(36), ForeignKey('cases.id'), index=True)
     kind: Mapped[str] = mapped_column(String(64))
     payload: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 
@@ -100,9 +102,15 @@ class RagChunk(Base):
     doc_id: Mapped[str] = mapped_column(String(64), index=True)
     title: Mapped[str] = mapped_column(String(256))
     doc_code: Mapped[str] = mapped_column(String(64), default='', index=True)
+    version_label: Mapped[str] = mapped_column(String(32), default='1.0')
+    effective_date: Mapped[str] = mapped_column(String(32), default='', index=True)
     source_type: Mapped[str] = mapped_column(String(32), default='procedure', index=True)
     source_priority: Mapped[float] = mapped_column(Float, default=1.0)
     section: Mapped[str] = mapped_column(String(256), default='')
+    section_path: Mapped[str] = mapped_column(String(512), default='')
+    chunk_type: Mapped[str] = mapped_column(String(32), default='paragraph', index=True)
+    risk_tags: Mapped[str] = mapped_column(String(256), default='')
+    is_mandatory_step: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     text: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(settings.rag_dim))
 
@@ -122,3 +130,12 @@ class AuditEvent(Base):
 
     event_type: Mapped[str] = mapped_column(String(64))
     payload: Mapped[str] = mapped_column(Text)
+    payload_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+    retrieval_snapshot_json: Mapped[list | dict | None] = mapped_column(JSONB, nullable=True)
+    state_before_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    state_after_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+    cache_info_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
+
+    prompt_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    policy_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
