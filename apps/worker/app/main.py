@@ -9,6 +9,7 @@ import time
 import traceback
 from contextlib import suppress
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 
@@ -16,11 +17,17 @@ from contracts.schemas import AnalyzeV1, DraftV1, Intent, Phase, RiskLevel, Sour
 from libs.common import llm_stub
 from libs.common.audit_store import add_audit_event
 from libs.common.config import settings
+from libs.common.copilot_postprocess import repair_draft
 from libs.common.db import SessionLocal, init_db
 from libs.common.kafka_bus import kafka_bus
 from libs.common.llm_client import analyze as llm_analyze, draft as llm_draft, stream_ghost
 from libs.common.models import Message
-from libs.common.moderator import moderate_input, moderate_output, moderate_retrieved, moderation_mode
+from libs.common.moderator import (
+    moderate_model_output,
+    moderate_retrieved_chunks,
+    moderate_user_input,
+    summarize_security_moderation,
+)
 from libs.common.pii import redact
 from libs.common.policy_meta import POLICY_VERSION, make_prompt_hash
 from libs.common.rag_search import hybrid_search
@@ -285,8 +292,15 @@ async def publish(r, task_id: str, event: str, data) -> None:
     await r.publish(_stream_chan(task_id), json.dumps({'event': event, 'data': data}, ensure_ascii=False))
 
 
-def _safe_draft(flags: list[dict], plan) -> DraftV1:
-    flag_text = ', '.join(flag.get('type', 'unknown') for flag in flags) or 'safety'
+def _safe_draft(flags: list[Any], plan) -> DraftV1:
+    normalized_flags: list[str] = []
+    for flag in flags:
+        if isinstance(flag, dict):
+            normalized_flags.append(str(flag.get('type') or flag.get('flag') or 'unknown'))
+        else:
+            normalized_flags.append(str(flag))
+    flag_text = ', '.join(normalized_flags) or 'safety'
+
     an = AnalyzeV1(
         schema_version='1.0',
         intent=Intent.SuspiciousTransaction,
@@ -316,6 +330,13 @@ def _safe_draft(flags: list[dict], plan) -> DraftV1:
 
 
 def _stabilize_draft_ghost(an_obj: dict, tools_ui: list, d_obj: dict) -> dict:
+    try:
+        an_model = AnalyzeV1.model_validate(an_obj)
+        d_model = DraftV1.model_validate(d_obj)
+        d_obj = repair_draft(d_model, an_model).model_dump()
+    except Exception:
+        pass
+
     text = (d_obj.get('ghost_text') or '').strip()
     if not text:
         return d_obj
@@ -368,6 +389,13 @@ async def _run_analyze(redacted: str, *, safe_mode: str, cached_a: str | None):
     return an.model_dump(), False
 
 
+def _output_fallback(output_mod: dict[str, Any]) -> str:
+    return output_mod.get('safe_text') or (
+        'Понял. Уточните только безопасные детали операции. '
+        'Мы не запрашиваем коды из SMS/Push, ПИН, CVV/CVC и не предлагаем удаленный доступ.'
+    )
+
+
 async def _run_draft(
     *,
     redacted: str,
@@ -379,7 +407,9 @@ async def _run_draft(
     cached_d: str | None,
 ):
     if cached_d:
-        return json.loads(cached_d), True, {'ok': True, 'flags': []}
+        d_obj = json.loads(cached_d)
+        output_mod = moderate_model_output(d_obj.get('ghost_text', '') or '')
+        return d_obj, True, output_mod
 
     an_model = AnalyzeV1.model_validate(an_obj)
     if safe_mode == 'block':
@@ -395,8 +425,8 @@ async def _run_draft(
         src_models = [SourceOut.model_validate(s) for s in sources]
         d = await llm_draft(an_model, plan, tools_ui, src_models, history=redacted)
 
-    mout = moderate_output(d.ghost_text)
-    return d.model_dump(), False, mout
+    output_mod = moderate_model_output(d.ghost_text)
+    return d.model_dump(), False, output_mod
 
 
 async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = None):
@@ -451,8 +481,8 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
             )
 
             await publish(r, task_id, 'progress', {'step': 'moderate_input', 'pct': 0.1})
-            mod = moderate_input(history)
-            safe_mode = moderation_mode(mod)
+            user_mod = moderate_user_input(history)
+            safe_mode = user_mod['mode']
             await audit(
                 db,
                 trace_id=trace_id,
@@ -460,7 +490,7 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                 actor_id=actor_id,
                 conversation_id=conv_id,
                 event_type='moderation_input',
-                payload={**mod, 'mode': safe_mode},
+                payload=user_mod,
             )
 
             redacted, pii_sum = redact(history)
@@ -508,6 +538,8 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
 
             rag_cached = False
             sources: list[dict] = []
+            retrieved_mod: dict[str, Any] | None = None
+
             if safe_mode == 'ok':
                 rkey = _rag_cache_key(redacted)
                 cached_sources = await r.get(rkey)
@@ -548,45 +580,20 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                     rag_cached = False
 
                 if sources:
-                    safe_sources: list[dict] = []
-                    dropped_sources: list[dict] = []
-
-                    for src in sources:
-                        retrieval_text = '\n'.join(
-                            [
-                                str(src.get('title') or ''),
-                                str(src.get('section') or ''),
-                                str(src.get('quote') or ''),
-                            ]
-                        )
-                        rmod = moderate_retrieved(retrieval_text)
-                        if rmod['ok']:
-                            safe_sources.append(src)
-                        else:
-                            dropped_sources.append(
-                                {
-                                    'doc_id': src.get('doc_id'),
-                                    'title': src.get('title'),
-                                    'section': src.get('section'),
-                                    'flags': rmod['flags'],
-                                }
-                            )
-
-                    sources = safe_sources
-
-                    if dropped_sources:
+                    retrieved_mod = moderate_retrieved_chunks(sources)
+                    sources = retrieved_mod.get('allowed_chunks') or []
+                    if retrieved_mod.get('blocked_chunk_indices'):
                         await audit(
                             db,
                             trace_id=trace_id,
                             actor_role='operator',
                             actor_id=actor_id,
                             conversation_id=conv_id,
-                            event_type='retrieval_guardrails',
-                            payload={
-                                'dropped_count': len(dropped_sources),
-                                'dropped': dropped_sources[:10],
-                            },
+                            event_type='moderation_retrieved',
+                            payload=retrieved_mod,
                         )
+                else:
+                    retrieved_mod = moderate_retrieved_chunks([])
             else:
                 await audit(
                     db,
@@ -658,48 +665,41 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
             cached_d = await r.get(dkey)
             draft_cached = bool(cached_d)
 
-            if cached_d:
-                d_obj = json.loads(cached_d)
-                await audit(
-                    db,
-                    trace_id=trace_id,
-                    actor_role='operator',
-                    actor_id=actor_id,
-                    conversation_id=conv_id,
-                    event_type='cache_hit',
-                    payload={'kind': 'draft'},
-                )
-            else:
-                d_obj, _, mout = await _run_draft(
-                    redacted=redacted,
-                    safe_mode=safe_mode,
-                    an_obj=an_obj,
-                    plan=plan,
-                    tools_ui=tools_ui,
-                    sources=sources,
-                    cached_d=None,
-                )
-                await audit(
-                    db,
-                    trace_id=trace_id,
-                    actor_role='operator',
-                    actor_id=actor_id,
-                    conversation_id=conv_id,
-                    event_type='cache_miss',
-                    payload={'kind': 'draft'},
-                )
-                await audit(
-                    db,
-                    trace_id=trace_id,
-                    actor_role='operator',
-                    actor_id=actor_id,
-                    conversation_id=conv_id,
-                    event_type='moderation_output',
-                    payload=mout,
-                )
-                if not mout['ok']:
-                    d_obj['ghost_text'] = 'Понял. Уточните только безопасные детали операции. Мы не запрашиваем коды из SMS/Push, ПИН, CVV/CVC и не предлагаем удаленный доступ.'
-                await r.set(dkey, json.dumps(d_obj, ensure_ascii=False), ex=600)
+            d_obj, draft_cached_actual, output_mod = await _run_draft(
+                redacted=redacted,
+                safe_mode=safe_mode,
+                an_obj=an_obj,
+                plan=plan,
+                tools_ui=tools_ui,
+                sources=sources,
+                cached_d=cached_d,
+            )
+            draft_cached = draft_cached_actual
+
+            await audit(
+                db,
+                trace_id=trace_id,
+                actor_role='operator',
+                actor_id=actor_id,
+                conversation_id=conv_id,
+                event_type='cache_hit' if draft_cached else 'cache_miss',
+                payload={'kind': 'draft'},
+            )
+
+            await audit(
+                db,
+                trace_id=trace_id,
+                actor_role='operator',
+                actor_id=actor_id,
+                conversation_id=conv_id,
+                event_type='moderation_output',
+                payload=output_mod,
+            )
+
+            if not output_mod['ok']:
+                d_obj['ghost_text'] = _output_fallback(output_mod)
+
+            await r.set(dkey, json.dumps(d_obj, ensure_ascii=False), ex=600)
 
             await publish(r, task_id, 'progress', {'step': 'draft', 'pct': 0.75})
 
@@ -729,7 +729,7 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                     if streamed_any:
                         d_obj['ghost_text'] = streamed_buf
                         d_obj = _stabilize_draft_ghost(an_obj, tools_ui, d_obj)
-                        mout_stream = moderate_output(d_obj.get('ghost_text', '') or '')
+                        output_mod_stream = moderate_model_output(d_obj.get('ghost_text', '') or '')
                         await audit(
                             db,
                             trace_id=trace_id,
@@ -737,10 +737,11 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                             actor_id=actor_id,
                             conversation_id=conv_id,
                             event_type='moderation_output_stream',
-                            payload=mout_stream,
+                            payload=output_mod_stream,
                         )
-                        if not mout_stream['ok']:
-                            d_obj['ghost_text'] = 'Понял. Уточните только безопасные детали операции. Мы не запрашиваем коды из SMS/Push, ПИН, CVV/CVC и не предлагаем удаленный доступ.'
+                        if not output_mod_stream['ok']:
+                            d_obj['ghost_text'] = _output_fallback(output_mod_stream)
+                        output_mod = output_mod_stream
                         if d_obj.get('ghost_text', '') != streamed_buf:
                             await publish(r, task_id, 'ghost_text_final', {'full': d_obj['ghost_text']})
                         streamed = True
@@ -758,6 +759,22 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                     chunk = ghost[i:i + 40]
                     buf += chunk
                     await publish(r, task_id, 'ghost_text', {'delta': chunk, 'full': buf})
+
+            security_summary = summarize_security_moderation(
+                user_input=user_mod,
+                retrieved=retrieved_mod if safe_mode == 'ok' else None,
+                model_output=output_mod,
+            )
+
+            await audit(
+                db,
+                trace_id=trace_id,
+                actor_role='operator',
+                actor_id=actor_id,
+                conversation_id=conv_id,
+                event_type='security_summary',
+                payload=security_summary,
+            )
 
             state = {
                 'conversation_id': conv_id,
@@ -788,6 +805,7 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                     'analyze_cached': analyze_cached,
                     'rag_cached': rag_cached,
                     'draft_cached': draft_cached,
+                    'security_mode': security_summary['mode'],
                 },
             )
 
@@ -811,7 +829,12 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                 actor_id=actor_id,
                 conversation_id=conv_id,
                 event_type='suggest_ready',
-                payload={'task_id': task_id, 'sources_count': len(sources), 'mode': safe_mode},
+                payload={
+                    'task_id': task_id,
+                    'sources_count': len(sources),
+                    'mode': safe_mode,
+                    'security_mode': security_summary['mode'],
+                },
                 retrieval_snapshot=sources,
                 state_before=state_before,
                 state_after=state,
@@ -821,6 +844,7 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
                     'rag_cached': rag_cached,
                     'draft_cached': draft_cached,
                     'streamed': streamed,
+                    'security_mode': security_summary['mode'],
                 },
             )
             await kafka_bus.publish(
@@ -864,27 +888,90 @@ async def run_task(task_id: str, *, worker_id: str, claimed_meta: dict | None = 
             await _release_task(r, task_id, worker_id)
 
 
+async def _run_claimed_task(
+    task_id: str,
+    *,
+    worker_id: str,
+    claimed_meta: dict,
+    semaphore: asyncio.Semaphore,
+) -> None:
+    try:
+        await run_task(task_id, worker_id=worker_id, claimed_meta=claimed_meta)
+    finally:
+        semaphore.release()
+
+
+async def _reclaim_loop(r, stop_event: asyncio.Event) -> None:
+    interval = max(1, int(settings.worker_reclaim_interval_sec))
+
+    while not stop_event.is_set():
+        try:
+            await _reclaim_expired_tasks(r)
+        except Exception:
+            traceback.print_exc(limit=4)
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
+
+
 async def main():
     await init_db()
 
     r = get_redis()
     worker_id = _worker_id()
 
-    while True:
-        await _reclaim_expired_tasks(r)
+    concurrency = max(1, int(settings.worker_concurrency))
+    block_timeout = max(1, int(settings.worker_queue_block_timeout_sec))
 
-        item = await r.blpop(_QUEUE_NAME, timeout=1)
-        if not item:
-            await asyncio.sleep(0.1)
-            continue
-        _, task_id = item
-        if isinstance(task_id, bytes):
-            task_id = task_id.decode('utf-8', errors='ignore')
+    semaphore = asyncio.Semaphore(concurrency)
+    inflight: set[asyncio.Task] = set()
 
-        claimed_meta = await _claim_task(r, str(task_id), worker_id)
-        if not claimed_meta:
-            continue
-        await run_task(str(task_id), worker_id=worker_id, claimed_meta=claimed_meta)
+    stop_event = asyncio.Event()
+    reclaim_task = asyncio.create_task(_reclaim_loop(r, stop_event))
+
+    try:
+        while True:
+            await semaphore.acquire()
+
+            item = await r.blpop(_QUEUE_NAME, timeout=block_timeout)
+            if not item:
+                semaphore.release()
+                await asyncio.sleep(0.05)
+                continue
+
+            _, task_id = item
+            if isinstance(task_id, bytes):
+                task_id = task_id.decode('utf-8', errors='ignore')
+
+            task_id = str(task_id)
+            claimed_meta = await _claim_task(r, task_id, worker_id)
+            if not claimed_meta:
+                semaphore.release()
+                continue
+
+            task = asyncio.create_task(
+                _run_claimed_task(
+                    task_id,
+                    worker_id=worker_id,
+                    claimed_meta=claimed_meta,
+                    semaphore=semaphore,
+                )
+            )
+            inflight.add(task)
+            task.add_done_callback(inflight.discard)
+
+    except asyncio.CancelledError:
+        raise
+    finally:
+        stop_event.set()
+        reclaim_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await reclaim_task
+
+        if inflight:
+            await asyncio.gather(*inflight, return_exceptions=True)
 
 
 if __name__ == '__main__':

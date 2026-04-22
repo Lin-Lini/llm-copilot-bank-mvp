@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from apps.backend.app.api.v1.router import router as v1
+from apps.backend.app.core.bus import chat_bus
 from libs.common.db import init_db
 from libs.common.kafka_bus import kafka_bus
 from libs.common.observability import collect_backend_dependencies, summarize_readiness
@@ -16,11 +17,13 @@ app.include_router(v1)
 @app.on_event('startup')
 async def _startup():
     await init_db()
+    await chat_bus.start()
     await kafka_bus.start()
 
 
 @app.on_event('shutdown')
 async def _shutdown():
+    await chat_bus.stop()
     await kafka_bus.stop()
 
 

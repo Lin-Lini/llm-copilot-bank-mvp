@@ -3,10 +3,10 @@ Async client for communicating with external LLM services.
 
 This module provides convenience wrappers around different modes of LLM
 interaction defined in the project: ``analyze``, ``draft``, ``explain`` and
-``stream_ghost``.  The URLs and API key are configured via the ``Settings``
-class in ``libs/common/config.py``.  When no URL is configured for a given mode,
+``stream_ghost``. The URLs and API key are configured via the ``Settings``
+class in ``libs/common/config.py``. When no URL is configured for a given mode,
 the functions fall back to the deterministic stub implementations found in
-``libs/common/llm_stub.py``.  This allows running the project locally without
+``libs/common/llm_stub.py``. This allows running the project locally without
 network calls while still enabling easy integration with real LLMs by
 providing the appropriate environment variables.
 """
@@ -27,9 +27,10 @@ from contracts.schemas import (
     ToolUI,
 )
 
+from libs.common import llm_openai_provider, llm_stub
+from libs.common.analyze_guardrails import normalize_analyze
 from libs.common.config import settings
-from libs.common import llm_stub
-from libs.common import llm_openai_provider
+from libs.common.copilot_postprocess import repair_draft
 
 
 def _auth_headers() -> dict[str, str]:
@@ -52,8 +53,11 @@ async def analyze(history: str, prev_result: Optional[dict[str, Any]] = None) ->
     url = settings.llm_analyze_url
     if not url:
         if (settings.llm_provider or '').lower() in ('openai_compat', 'openai', 'oai') and settings.llm_base_url:
-            return await llm_openai_provider.analyze(history, prev_result=prev_result)
-        return llm_stub.analyze(history)
+            raw = await llm_openai_provider.analyze(history, prev_result=prev_result)
+            return normalize_analyze(history, raw)
+
+        raw = llm_stub.analyze(history)
+        return normalize_analyze(history, raw)
 
     payload: dict[str, Any] = {'history': history}
     if prev_result is not None:
@@ -62,7 +66,8 @@ async def analyze(history: str, prev_result: Optional[dict[str, Any]] = None) ->
     resp = await _post_json(url, payload)
     resp.raise_for_status()
     data = resp.json()
-    return AnalyzeV1.model_validate(data)
+    raw = AnalyzeV1.model_validate(data)
+    return normalize_analyze(history, raw)
 
 
 async def draft(
@@ -76,8 +81,10 @@ async def draft(
     url = settings.llm_draft_url
     if not url:
         if (settings.llm_provider or '').lower() in ('openai_compat', 'openai', 'oai') and settings.llm_base_url:
-            return await llm_openai_provider.draft(history, an, plan, tools_ui, sources)
-        return llm_stub.draft(an, plan, tools_ui, sources)
+            raw = await llm_openai_provider.draft(history, an, plan, tools_ui, sources)
+            return repair_draft(raw, an)
+        raw = llm_stub.draft(an, plan, tools_ui, sources)
+        return repair_draft(raw, an)
 
     payload: dict[str, Any] = {
         'analyze': an.model_dump(),
@@ -88,7 +95,8 @@ async def draft(
     resp = await _post_json(url, payload)
     resp.raise_for_status()
     data = resp.json()
-    return DraftV1.model_validate(data)
+    raw = DraftV1.model_validate(data)
+    return repair_draft(raw, an)
 
 
 async def explain(tool_name: str, tool_result: dict[str, Any], plan: Plan) -> ExplainV1:
@@ -139,7 +147,7 @@ async def stream_ghost(
             yield delta
         return
 
-    draft_obj = llm_stub.draft(an, plan, tools_ui, sources or [])
+    draft_obj = repair_draft(llm_stub.draft(an, plan, tools_ui, sources or []), an)
     ghost = draft_obj.ghost_text or ''
     for i in range(0, len(ghost), 40):
         yield ghost[i:i + 40]

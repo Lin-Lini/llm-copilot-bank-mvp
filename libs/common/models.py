@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -47,8 +47,18 @@ class Case(Base):
     card_ref_masked: Mapped[str] = mapped_column(String(128), default='')
     operation_ref: Mapped[str] = mapped_column(String(128), default='')
     dispute_reason: Mapped[str] = mapped_column(String(256), default='')
-    facts_confirmed_json: Mapped[str] = mapped_column(Text, default='[]')
-    facts_pending_json: Mapped[str] = mapped_column(Text, default='[]')
+    facts_confirmed_json: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=sa_text("'[]'::jsonb"),
+    )
+    facts_pending_json: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+        server_default=sa_text("'[]'::jsonb"),
+    )
     decision_summary: Mapped[str] = mapped_column(Text, default='')
     status: Mapped[str] = mapped_column(String(32), default='open')
     summary_public: Mapped[str] = mapped_column(Text, default='')
@@ -67,6 +77,17 @@ class CaseTimeline(Base):
     payload_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
+class CaseDossierSnapshot(Base):
+    __tablename__ = 'case_dossiers'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    case_id: Mapped[str] = mapped_column(String(36), ForeignKey('cases.id'), unique=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String(16), default='1.0')
+    current_status: Mapped[str] = mapped_column(String(32), default='open')
+    built_from_timeline_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    payload_json: Mapped[dict | list | None] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
 
 class CaseProfileField(Base):
     __tablename__ = 'case_profile_fields'

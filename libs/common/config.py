@@ -8,13 +8,11 @@ class Settings(BaseSettings):
 
     app_env: str = 'dev'
 
-    internal_auth_token: str = 'dev-internal-token'
-    internal_auth_signing_key: str = 'dev-internal-signing-key'
-    internal_auth_ttl_sec: int = 45
-    internal_auth_allow_legacy_token: bool = True
-
     database_url: str = 'postgresql+asyncpg://postgres:postgres@postgres:5432/copilot'
     redis_url: str = 'redis://redis:6379/0'
+
+    chat_bus_backend: str = 'redis'
+    chat_bus_prefix: str = 'copilot:chat'
 
     minio_endpoint: str = 'minio:9000'
     minio_access_key: str = 'minioadmin'
@@ -56,6 +54,21 @@ class Settings(BaseSettings):
     worker_reclaim_batch: int = 20
     worker_result_ttl_sec: int = 3600
     worker_cancel_ttl_sec: int = 3600
+    worker_concurrency: int = 4
+    worker_queue_block_timeout_sec: int = 1
+    worker_reclaim_interval_sec: int = 5
+
+    internal_auth_token: str = 'dev-internal-token'
+    internal_auth_signing_key: str = 'dev-internal-signing-key-change-me'
+    internal_auth_ttl_sec: int = 60
+    internal_auth_audience: str = 'internal'
+    internal_auth_allowed_issuers: str = 'backend,worker,mcp-tools'
+    internal_auth_clock_skew_sec: int = 10
+    internal_auth_require_request_id: bool = True
+    internal_auth_allow_legacy_token: bool = False
+    internal_auth_require_signed_for_service: bool = True
+    internal_auth_require_signed_for_operator: bool = True
+    internal_auth_require_signed_for_all: bool = False
 
 
 settings = Settings()

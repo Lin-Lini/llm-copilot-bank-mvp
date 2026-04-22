@@ -1,0 +1,148 @@
+[
+  {
+    "name": "Security: SMS code and social engineering",
+    "query": "клиент сообщил код из SMS и есть риск мошенничества, что говорить и что делать",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "защиты пдн и противодействия социнжинирингу"
+      },
+      {
+        "title_contains": "скрипты ответов оператора"
+      }
+    ],
+    "expected_security_any": [
+      {
+        "title_contains": "защиты пдн и противодействия социнжинирингу"
+      },
+      {
+        "title_contains": "блокировки карты"
+      }
+    ],
+    "notes": "Ожидаем попадание в security policy и/или operator scripts."
+  },
+  {
+    "name": "Block card immediately",
+    "query": "клиент просит срочно заблокировать карту после подозрительной активности",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "блокировки карты"
+      },
+      {
+        "title_contains": "скрипты ответов оператора"
+      }
+    ],
+    "expected_security_any": [
+      {
+        "title_contains": "блокировки карты"
+      }
+    ],
+    "notes": "Базовый сценарий блокировки карты."
+  },
+  {
+    "name": "Lost or stolen card",
+    "query": "карта потеряна или украдена, что делать дальше",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "утрата, кража карты"
+      },
+      {
+        "title_contains": "блокировки карты"
+      }
+    ],
+    "expected_security_any": [
+      {
+        "title_contains": "блокировки карты"
+      }
+    ],
+    "notes": "Для утраты/кражи должен быть релевантен хотя бы один регламент."
+  },
+  {
+    "name": "Dispute suspicious transaction",
+    "query": "оспаривание подозрительной операции по карте клиент не совершал платеж",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "оспариванию операций по карте"
+      },
+      {
+        "title_contains": "дублированных и спорных списаний"
+      }
+    ],
+    "notes": "Спорная операция должна находить dispute-related документы."
+  },
+  {
+    "name": "Recurring subscriptions",
+    "query": "регулярные списания и подписки по карте клиент не понимает откуда они",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "подписок, регулярных списаний"
+      }
+    ],
+    "notes": "Проверка merchant-dispute / subscriptions."
+  },
+  {
+    "name": "Case status question",
+    "query": "клиент спрашивает статус обращения и что будет дальше",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "статусов кейса"
+      },
+      {
+        "title_contains": "статусы, эскалация и fallback"
+      }
+    ],
+    "notes": "Проверка статусного сценария."
+  },
+  {
+    "name": "Escalation to antifraud",
+    "query": "когда нужно эскалировать кейс в антифрод и как приоритизировать",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "эскалации в антифрод"
+      }
+    ],
+    "notes": "Проверка escalation policy."
+  },
+  {
+    "name": "Fallback when tools are unavailable",
+    "query": "что делать если внутренние инструменты временно недоступны",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "недоступности инструментов"
+      },
+      {
+        "title_contains": "fallback"
+      }
+    ],
+    "notes": "Проверка fallback-сценариев."
+  },
+  {
+    "name": "Duplicate or delayed charge",
+    "query": "двойное списание или отложенная операция по карте как обрабатывать",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "дублированных и спорных списаний"
+      }
+    ],
+    "notes": "Проверка duplicate/delayed transaction flow."
+  },
+  {
+    "name": "Operator wording for dispute flow",
+    "query": "как оператору корректно ответить клиенту при оспаривании операции и блокировке карты",
+    "top_k": 5,
+    "expected_any": [
+      {
+        "title_contains": "скрипты ответов оператора"
+      }
+    ],
+    "notes": "Проверка попадания в operator scripts."
+  }
+]

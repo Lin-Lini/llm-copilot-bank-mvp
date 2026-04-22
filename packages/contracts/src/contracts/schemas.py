@@ -109,6 +109,62 @@ class RiskChecklistItem(StrictModel):
     text: str
 
 
+class MissingFieldMeta(StrictModel):
+    field_name: str
+    label: str
+    why_needed: str
+    severity: Severity
+    blocks_tools: list[ToolName]
+    confirmable: bool = True
+    suggested_question: str | None = None
+
+
+class ReadinessStatus(str, Enum):
+    needs_info = 'needs_info'
+    ready = 'ready'
+    in_progress = 'in_progress'
+    completed = 'completed'
+
+
+class ReadinessToolState(StrictModel):
+    tool: ToolName
+    ready: bool
+    reason: str
+
+
+class CaseReadiness(StrictModel):
+    score: int = Field(ge=0, le=100)
+    status: ReadinessStatus
+    blockers: list[str]
+    missing_fields: list[MissingFieldMeta]
+    ready_tools: list[ReadinessToolState]
+    blocked_tools: list[ReadinessToolState]
+    next_action: str
+
+class DossierRiskSummary(StrictModel):
+    risk_level: RiskLevel
+    danger_flags: list[str]
+    security_notes: list[str]
+
+
+class DossierAction(StrictModel):
+    kind: str
+    summary: str
+    created_at: str
+
+
+class CaseDossier(StrictModel):
+    case_id: str
+    intent: Intent
+    client_problem_summary: str
+    confirmed_facts: list[str]
+    pending_facts: list[str]
+    risk_summary: DossierRiskSummary
+    actions_taken: list[DossierAction]
+    current_status: str
+    next_expected_step: str
+    operator_safe_context: str
+
 class Sidebar(StrictModel):
     phase: Phase
     intent: Intent
@@ -116,6 +172,8 @@ class Sidebar(StrictModel):
     facts_preview: FactsPreview
     sources: list[SourceOut]
     tools: list[ToolUI]
+    missing_fields_meta: list[MissingFieldMeta]
+    readiness: CaseReadiness
     risk_checklist: list[RiskChecklistItem]
     danger_flags: list[DangerFlag]
     operator_notes: str

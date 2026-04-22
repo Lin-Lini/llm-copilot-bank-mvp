@@ -21,6 +21,7 @@ from contracts.schemas import (
 )
 
 from libs.common.config import settings
+from libs.common.case_readiness import build_missing_field_meta, build_readiness
 from libs.common.llm_stub import _risk_checklist
 from libs.common.openai_compat import chat_completion, chat_completion_json, chat_completion_stream
 from libs.common.prompts_ru import BASE_POLICY_RU, ANALYZE_RU, GHOST_RU, EXPLAIN_RU
@@ -173,6 +174,8 @@ async def draft(history: str, an: AnalyzeV1, plan: Plan, tools_ui: list[ToolUI],
         ),
         sources=sources,
         tools=tools_ui,
+        missing_fields_meta=build_missing_field_meta(an.intent, an.missing_fields),
+        readiness=build_readiness(intent=an.intent, missing_fields=an.missing_fields, tools=tools_ui),
         risk_checklist=an.risk_checklist or _risk_checklist(),
         danger_flags=an.danger_flags,
         operator_notes='Используй найденные регламенты/скрипты как основу. Если не хватает данных, добери уточнения.'
@@ -240,7 +243,8 @@ def _sanitize_explain_updates(plan: Plan, proposed: ExplainV1) -> ExplainUpdates
 async def explain(tool_name: str, tool_result: dict[str, Any], plan: Plan) -> ExplainV1:
     model = settings.llm_explain_model or settings.llm_draft_model or settings.llm_analyze_model
     from libs.common.llm_stub import explain as stub_e
-    from libs.common.llm_stub import _risk_checklist as _rc
+    from libs.common.case_readiness import build_missing_field_meta, build_readiness
+    from libs.common.llm_stub import _risk_checklist
 
     # Бэковый fallback: работает всегда и не ломает state machine
     def _fallback() -> ExplainV1:
