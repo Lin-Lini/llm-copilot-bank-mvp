@@ -168,9 +168,14 @@ def reduce_plan_after_tool(plan: Plan, tool_name: str) -> Plan:
 
     if tool == ToolName.create_case:
         if _has_step(plan, 'case_create'):
+            act_get_txn_pending = any(step.id == 'act_get_txn' and not step.done for step in plan.steps)
+            if act_get_txn_pending:
+                return _apply_done(plan, {'case_create'}, fallback_step='act_get_txn')
             return _apply_done(plan, {'case_create'}, fallback_step='explain_next')
+
         if _has_step(plan, 'case_or_escalate'):
             return _apply_done(plan, {'case_or_escalate'}, fallback_step='explain_reissue')
+
         return _apply_done(plan, {'act'}, fallback_step='explain')
 
     if tool == ToolName.get_case_status:
@@ -184,13 +189,18 @@ def reduce_plan_after_tool(plan: Plan, tool_name: str) -> Plan:
             return _apply_done(plan, {'block_now'}, fallback_step=next_step)
         return _apply_done(plan, {'act'}, fallback_step='explain')
 
-    if tool in {ToolName.unblock_card, ToolName.reissue_card, ToolName.get_card_limits, ToolName.set_card_limits, ToolName.toggle_online_payments}:
+    if tool in {
+        ToolName.unblock_card,
+        ToolName.reissue_card,
+        ToolName.get_card_limits,
+        ToolName.set_card_limits,
+        ToolName.toggle_online_payments,
+    }:
         if _has_step(plan, 'case_or_escalate'):
             return _apply_done(plan, {'case_or_escalate'}, fallback_step='explain_reissue')
         return _apply_done(plan, {'act'}, fallback_step='explain')
 
     return plan
-
 
 def phase_from_plan(plan: Plan) -> Phase:
     current = plan.current_step_id
@@ -206,17 +216,20 @@ def resolve_tools(
     phase: Phase,
     *,
     missing_fields: Iterable[str] | None = None,
+    confirmed_fields: Iterable[str] | None = None,
     safe_mode: str = 'ok',
     execution_params: dict[str, Any] | None = None,
 ) -> list[ToolUI]:
     missing = set(missing_fields or [])
+    confirmed = set(confirmed_fields or [])
+    effective_missing = missing - confirmed
     params = execution_params or {}
 
     resolved: list[ToolUI] = []
     for tool_ui in allowed_tools(intent, phase):
         current = tool_ui
 
-        if current.tool == ToolName.get_transactions and (_TXN_REQUIRED_FIELDS & missing):
+        if current.tool == ToolName.get_transactions and (_TXN_REQUIRED_FIELDS & effective_missing):
             current = current.model_copy(
                 update={
                     'enabled': False,
@@ -226,7 +239,7 @@ def resolve_tools(
 
         if current.tool == ToolName.block_card:
             requested_confirm = bool(params.get('client_confirmed'))
-            confirmed_from_state = _BLOCK_CONFIRM_FIELD not in missing
+            confirmed_from_state = _BLOCK_CONFIRM_FIELD in confirmed
             high_risk_intent = intent in {Intent.BlockCard, Intent.LostStolen}
 
             if requested_confirm or confirmed_from_state or high_risk_intent:
@@ -235,7 +248,12 @@ def resolve_tools(
                     reason = 'Сценарий повышенного риска допускает блокировку.'
                 current = current.model_copy(update={'enabled': True, 'reason': reason})
             else:
-                current = current.model_copy(update={'enabled': False, 'reason': 'Нужно подтверждение клиента.'})
+                current = current.model_copy(
+                    update={
+                        'enabled': False,
+                        'reason': 'Нужно явное подтверждение клиента на блокировку.',
+                    }
+                )
 
         if safe_mode != 'ok' and current.tool not in {ToolName.create_case}:
             current = current.model_copy(

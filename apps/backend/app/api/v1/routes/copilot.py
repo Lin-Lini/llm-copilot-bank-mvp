@@ -31,24 +31,28 @@ from apps.backend.app.core.access import require_conversation_access, require_ta
 from apps.backend.app.core.audit import add_audit
 from apps.backend.app.core.deps import get_db
 from libs.common.config import settings
+from libs.common.copilot_postprocess import repair_explain
 from libs.common.internal_auth import build_internal_headers
+from libs.common.json_lists import normalize_string_list, parse_string_list
 from libs.common.llm_client import explain as llm_explain
 from libs.common.llm_stub import explain as stub_explain
 from libs.common.models import Case, CaseProfileField, CaseTimeline
-from libs.common.moderator import moderate_output
-from libs.common.policy_meta import POLICY_VERSION, make_prompt_hash
+from libs.common.moderator import moderate_model_output, summarize_security_moderation
 from libs.common.redis_client import get_redis
 from libs.common.security import require_operator
-from libs.common.state_engine import build_plan, phase_from_plan, reduce_plan_after_tool, resolve_tools
+from libs.common.state_engine import phase_from_plan, reduce_plan_after_tool, resolve_tools
+
 
 router = APIRouter(prefix='/copilot', tags=['copilot'])
+
+POLICY_VERSION = '2026-04-21.1'
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _trace(x_request_id: str | None) -> str:
+def _trace(x_request_id: str | None = None) -> str:
     return x_request_id or str(uuid.uuid4())
 
 
@@ -72,7 +76,21 @@ def _state_key(conversation_id: str) -> str:
     return f'copilot:state:{conversation_id}'
 
 
-@router.post('/suggest', status_code=202, response_model=SuggestCreated)
+def make_prompt_hash(*parts) -> str:
+    import hashlib
+
+    payload = json.dumps(parts, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _safe_explain_fallback(mod: dict) -> str:
+    return mod.get('safe_text') or (
+        'Действие выполнено. Для безопасности используйте только подтвержденный результат '
+        'инструмента и не запрашивайте коды из SMS/Push, ПИН, CVV/CVC или полный номер карты.'
+    )
+
+
+@router.post('/suggest', response_model=SuggestCreated, status_code=202)
 async def suggest(
     req: SuggestRequest,
     actor=Depends(require_operator),
@@ -182,28 +200,13 @@ async def suggest_stream(task_id: str, actor=Depends(require_operator)):
 
 
 @router.get('/state', response_model=CopilotState)
-async def state(
-    conversation_id: str,
-    actor=Depends(require_operator),
-    db: AsyncSession = Depends(get_db),
-):
+async def state(conversation_id: str, actor=Depends(require_operator), db: AsyncSession = Depends(get_db)):
     await require_conversation_access(db, actor, conversation_id)
-
     r = get_redis()
     raw = await r.get(_state_key(conversation_id))
     if not raw:
-        plan = build_plan(Intent.Unknown)
-        return CopilotState(
-            conversation_id=conversation_id,
-            intent=Intent.Unknown,
-            phase=Phase.Collect,
-            plan=plan,
-            last_analyze=None,
-            last_draft=None,
-        )
-
-    obj = json.loads(raw)
-    return CopilotState.model_validate(obj)
+        raise HTTPException(status_code=404, detail='state not found')
+    return CopilotState.model_validate(json.loads(raw))
 
 
 @router.post('/tools/execute', response_model=ExecuteToolResponse)
@@ -243,10 +246,23 @@ async def execute_tool(
     if st.get('last_analyze') and isinstance(st['last_analyze'], dict):
         missing_fields = st['last_analyze'].get('missing_fields') or []
 
+    latest_case = (
+        await db.execute(
+            select(Case)
+            .where(Case.conversation_id == req.conversation_id)
+            .order_by(Case.created_at.desc())
+        )
+    ).scalars().first()
+
+    confirmed_fields: list[str] = []
+    if latest_case is not None:
+        confirmed_fields = parse_string_list(latest_case.facts_confirmed_json)
+
     tools_ui = resolve_tools(
         Intent(intent),
         Phase(phase),
         missing_fields=missing_fields,
+        confirmed_fields=confirmed_fields,
         execution_params=req.params,
     )
     dynamic_allow = {tool.tool.value: tool for tool in tools_ui}
@@ -272,6 +288,14 @@ async def execute_tool(
 
     params = dict(req.params)
     params['conversation_id'] = req.conversation_id
+
+    if req.tool.value == 'create_case':
+        if not params.get('intent'):
+            params['intent'] = intent.value
+
+        if not params.get('summary_public'):
+            last_analyze = st.get('last_analyze') or {}
+            params['summary_public'] = last_analyze.get('summary_public') or 'Обращение создано'
 
     payload = ToolExecuteRequest(
         tool=req.tool,
@@ -307,11 +331,32 @@ async def execute_tool(
     if req.tool.value in {'create_case', 'block_card'}:
         exp = stub_explain(req.tool.value, tool_resp.result, deterministic_plan)
 
-    mod = moderate_output(exp.ghost_text)
+    exp = repair_explain(
+        exp,
+        state_before=state_before,
+        tool_name=req.tool.value,
+    )
+
+    mod = moderate_model_output(exp.ghost_text)
+    security_summary = summarize_security_moderation(model_output=mod)
+
+    await add_audit(
+        db,
+        trace_id=trace_id,
+        actor_role=actor['role'],
+        actor_id=actor['id'],
+        conversation_id=req.conversation_id,
+        event_type='moderation_output',
+        payload=security_summary,
+        state_before=state_before,
+        prompt_hash=tool_prompt_hash,
+        policy_version=POLICY_VERSION,
+    )
+
     if not mod['ok']:
         exp = exp.model_copy(
             update={
-                'ghost_text': 'Действие выполнено. Для безопасности используйте только подтвержденный результат инструмента и не запрашивайте коды из SMS/Push или полный номер карты.'
+                'ghost_text': _safe_explain_fallback(mod)
             }
         )
 
@@ -372,12 +417,16 @@ async def execute_tool(
             'tool': req.tool.value,
             'result': tool_resp.result,
             'llm_updates_ignored': True,
+            'security_mode': security_summary['mode'],
         },
         state_before=state_before,
         state_after=new_state,
         prompt_hash=tool_prompt_hash,
         policy_version=POLICY_VERSION,
-        cache_info={'moderation_blocked': not mod['ok']},
+        cache_info={
+            'moderation_blocked': not mod['ok'],
+            'security_mode': security_summary['mode'],
+        },
     )
 
     return ExecuteToolResponse(tool=req.tool, result=tool_resp.result, explain=exp)
@@ -412,8 +461,8 @@ async def profile_confirm(
         return ProfileConfirmResponse(stored=0)
 
     stored = 0
-    confirmed = json.loads(c.facts_confirmed_json or '[]')
-    pending = json.loads(c.facts_pending_json or '[]')
+    confirmed = parse_string_list(c.facts_confirmed_json)
+    pending = parse_string_list(c.facts_pending_json)
 
     for f in req.fields:
         row = CaseProfileField(
@@ -430,8 +479,8 @@ async def profile_confirm(
             confirmed.append(f.field_name)
         pending = [item for item in pending if item != f.field_name]
 
-    c.facts_confirmed_json = json.dumps(confirmed, ensure_ascii=False)
-    c.facts_pending_json = json.dumps(pending, ensure_ascii=False)
+    c.facts_confirmed_json = normalize_string_list(confirmed)
+    c.facts_pending_json = normalize_string_list(pending)
     c.updated_at = datetime.now(timezone.utc)
     db.add(c)
 
@@ -446,6 +495,21 @@ async def profile_confirm(
         db.add(tl)
 
     await db.commit()
+
+    r = get_redis()
+    state_raw = await r.get(_state_key(req.conversation_id))
+    if state_raw:
+        try:
+            st = json.loads(state_raw)
+            last_analyze = st.get('last_analyze')
+            if isinstance(last_analyze, dict):
+                confirmed_now = {f.field_name for f in req.fields}
+                current_missing = last_analyze.get('missing_fields') or []
+                last_analyze['missing_fields'] = [x for x in current_missing if x not in confirmed_now]
+                st['last_analyze'] = last_analyze
+                await r.set(_state_key(req.conversation_id), json.dumps(st, ensure_ascii=False), ex=86400)
+        except Exception:
+            pass
 
     await add_audit(
         db,

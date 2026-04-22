@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
@@ -9,13 +10,14 @@ import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
 
 from contracts.schemas import InternalCreateCaseRequest, ToolExecuteRequest, ToolExecuteResponse, ToolName
-from libs.common.config import settings
+from libs.common.internal_auth import build_internal_headers
 from libs.common.kafka_bus import kafka_bus
 from libs.common.redis_client import get_redis
 from libs.common.security import require_operator
-from libs.common.internal_auth import build_internal_headers
 
 router = APIRouter(prefix='/tools', tags=['tools'])
+
+_IDEMPOTENCY_TTL_SEC = 3600
 
 
 def _idem_scope(params: dict[str, Any], actor: dict) -> str:
@@ -24,9 +26,19 @@ def _idem_scope(params: dict[str, Any], actor: dict) -> str:
     return f"{actor['role']}:{actor['id']}:{conv_id}:{case_id}"
 
 
-def _idem_key(tool: str, key: str, scope: str) -> str:
+def _params_hash(params: dict[str, Any]) -> str:
+    payload = json.dumps(params or {}, ensure_ascii=False, sort_keys=True, separators=(',', ':'), default=str)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+
+def _idem_meta_key(tool: str, key: str, scope: str) -> str:
     scope = scope or '-'
-    return f'mcp:idem:{tool}:{scope}:{key}'
+    return f'mcp:idem-meta:{tool}:{scope}:{key}'
+
+
+def _idem_result_key(tool: str, key: str, scope: str, params_hash: str) -> str:
+    scope = scope or '-'
+    return f'mcp:idem:{tool}:{scope}:{key}:{params_hash}'
 
 
 def _now() -> str:
@@ -79,11 +91,19 @@ async def execute(
 ):
     r = get_redis()
     tool = req.tool.value
-    idem_key = _idem_key(tool, req.idempotency_key, _idem_scope(req.params, actor))
+    scope = _idem_scope(req.params, actor)
+    params_hash = _params_hash(req.params)
+    meta_key = _idem_meta_key(tool, req.idempotency_key, scope)
+    result_key = _idem_result_key(tool, req.idempotency_key, scope, params_hash)
 
-    cached = await r.get(idem_key)
-    if cached:
-        return ToolExecuteResponse.model_validate(json.loads(cached))
+    stored_params_hash = await r.get(meta_key)
+    if stored_params_hash:
+        if stored_params_hash != params_hash:
+            raise HTTPException(status_code=409, detail='idempotency_key reused with different params')
+
+        cached = await r.get(result_key)
+        if cached:
+            return ToolExecuteResponse.model_validate(json.loads(cached))
 
     trace_id = x_request_id or req.trace_id or str(uuid.uuid4())
 
@@ -96,6 +116,7 @@ async def execute(
             'actor_id': actor['id'],
             't': _now(),
             'idempotency_key': req.idempotency_key,
+            'params_hash': params_hash,
         },
     )
 
@@ -108,7 +129,11 @@ async def execute(
         if not conv_id:
             raise HTTPException(status_code=400, detail='conversation_id required in params for create_case')
 
-        body = InternalCreateCaseRequest(conversation_id=conv_id, summary_public=summary, intent=intent).model_dump()
+        body = InternalCreateCaseRequest(
+            conversation_id=conv_id,
+            summary_public=summary,
+            intent=intent,
+        ).model_dump()
         result = await _backend_post('/api/v1/_internal/cases/create', actor, trace_id, body)
 
     elif req.tool == ToolName.get_case_status:
@@ -159,8 +184,10 @@ async def execute(
             'actor_id': actor['id'],
             't': _now(),
             'result': result,
+            'params_hash': params_hash,
         },
     )
 
-    await r.set(idem_key, json.dumps(resp.model_dump(), ensure_ascii=False), ex=3600)
+    await r.set(meta_key, params_hash, ex=_IDEMPOTENCY_TTL_SEC)
+    await r.set(result_key, json.dumps(resp.model_dump(), ensure_ascii=False), ex=_IDEMPOTENCY_TTL_SEC)
     return resp

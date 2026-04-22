@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from apps.backend.app.core.bus import Broadcast
+from apps.backend.app.core.bus import Broadcast, RedisSubscription
 
 
 @pytest.mark.asyncio
@@ -21,3 +21,15 @@ async def test_broadcast_isolates_topics():
 
     await bus.unsubscribe('conv-1', q1)
     await bus.unsubscribe('conv-2', q2)
+
+
+def test_redis_subscription_is_hashable_for_set_storage():
+    sub = RedisSubscription(
+        topic='conv-1',
+        queue=asyncio.Queue(),
+        pubsub=object(),
+        reader_task=object(),
+    )
+
+    bucket = {sub}
+    assert sub in bucket

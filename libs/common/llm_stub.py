@@ -28,6 +28,7 @@ from contracts.schemas import (
     ToolSuggested,
     ToolUI,
 )
+from libs.common.case_readiness import build_missing_field_meta, build_readiness
 
 
 def _risk_checklist() -> list[RiskChecklistItem]:
@@ -95,8 +96,16 @@ def analyze(history_redacted: str) -> AnalyzeV1:
             'Подтвердите, что вы не совершали эту операцию и хотите зафиксировать обращение.',
         ]
         tools = [
-            ToolSuggested(tool='get_transactions', reason='Нужно сверить детали спорной операции по списку транзакций.', params_hint={'date_range': 'последние 7 дней'}),
-            ToolSuggested(tool='create_case', reason='Для корректной обработки спорной операции нужно зарегистрировать обращение.', params_hint={'intent': intent.value}),
+            ToolSuggested(
+                tool='get_transactions',
+                reason='Нужно сверить детали спорной операции по списку транзакций.',
+                params_hint={'date_range': 'последние 7 дней'},
+            ),
+            ToolSuggested(
+                tool='create_case',
+                reason='Для корректной обработки спорной операции нужно зарегистрировать обращение.',
+                params_hint={'intent': intent.value},
+            ),
         ]
 
     elif intent in {Intent.BlockCard, Intent.LostStolen}:
@@ -113,8 +122,16 @@ def analyze(history_redacted: str) -> AnalyzeV1:
             'Карта потеряна, украдена или есть риск компрометации реквизитов?',
         ]
         tools = [
-            ToolSuggested(tool='block_card', reason='Нужно срочно снизить риск повторных списаний.', params_hint={}),
-            ToolSuggested(tool='create_case', reason='Нужно зафиксировать риск и дальнейшие действия.', params_hint={'intent': intent.value}),
+            ToolSuggested(
+                tool='block_card',
+                reason='Нужно срочно снизить риск повторных списаний.',
+                params_hint={},
+            ),
+            ToolSuggested(
+                tool='create_case',
+                reason='Нужно зафиксировать риск и дальнейшие действия.',
+                params_hint={'intent': intent.value},
+            ),
         ]
 
     elif intent == Intent.StatusWhatNext:
@@ -126,12 +143,22 @@ def analyze(history_redacted: str) -> AnalyzeV1:
         missing = [] if has_case_id else ['case_id']
         next_questions = ['Подскажите номер обращения или уточните, по какой операции нужен статус.']
         tools = [
-            ToolSuggested(tool='get_case_status', reason='Нужно вернуть подтвержденный статус кейса.', params_hint={}),
+            ToolSuggested(
+                tool='get_case_status',
+                reason='Нужно вернуть подтвержденный статус кейса.',
+                params_hint={},
+            ),
         ]
 
     danger = []
     if has('мошен', 'подозр', 'удаленный доступ', 'anydesk', 'teamviewer', 'безопасный счет'):
-        danger.append(DangerFlag(type='scam_suspected', severity=Severity.high, text='Возможны признаки мошенничества или социнжиниринга.'))
+        danger.append(
+            DangerFlag(
+                type='scam_suspected',
+                severity=Severity.high,
+                text='Возможны признаки мошенничества или социнжиниринга.',
+            )
+        )
 
     facts = AnalyzeFacts(
         card_hint=None,
@@ -171,20 +198,40 @@ def analyze(history_redacted: str) -> AnalyzeV1:
 
 def draft(an: AnalyzeV1, plan: Plan, tools_ui: list[ToolUI], sources: list[SourceOut]) -> DraftV1:
     ghost = 'Понимаю. Чтобы проверить ситуацию и корректно зафиксировать обращение, уточните, пожалуйста: карта сейчас у вас на руках? Также подтвердите сумму и примерное время операции. После этого подскажу дальнейшие шаги.'
-    operator_notes = 'Сначала соберите подтверждения по операции и наличие карты у клиента. Затем выполните сверку операций и оформите обращение.' if an.intent == Intent.SuspiciousTransaction else 'Соберите данные и выберите следующий шаг.'
+    operator_notes = (
+        'Сначала соберите подтверждения по операции и наличие карты у клиента. Затем выполните сверку операций и оформите обращение.'
+        if an.intent == Intent.SuspiciousTransaction
+        else 'Соберите данные и выберите следующий шаг.'
+    )
 
     if an.intent in {Intent.BlockCard, Intent.LostStolen}:
         ghost = 'Понял. Для безопасности карты уточните, пожалуйста, нужно ли заблокировать ее прямо сейчас. После подтверждения подскажу следующий шаг и помогу зафиксировать обращение.'
         operator_notes = 'При подтверждении высокого риска сначала блокировка, затем фиксация кейса и рекомендации по перевыпуску.'
     elif an.intent == Intent.StatusWhatNext:
-        ghost = 'Понял. Подскажите номер обращения или уточните, по какой операции нужен статус, и я подскажу следующий шаг без догадок и лишней самодеятельности.'
+        ghost = 'Понял. Подскажите номер обращения или уточните, по какой операции нужен статус, и я подскажу следующий шаг без догадок.'
         operator_notes = 'Нужен подтвержденный идентификатор кейса или контекст обращения; статус сообщать только после tool_result.'
 
     qc = [
-        QuickCard(title='Уточнить: карта у клиента?', insert_text='Подтвердите, пожалуйста, карта сейчас у вас на руках (да/нет)?', kind=QuickCardKind.question),
-        QuickCard(title='Уточнить сумму/время', insert_text='Подтвердите сумму и примерное время операции, чтобы я мог(ла) сверить данные.', kind=QuickCardKind.question),
-        QuickCard(title='Подтверждение: операция не ваша', insert_text='Подтвердите, пожалуйста, что вы не совершали эту операцию.', kind=QuickCardKind.confirmation),
-        QuickCard(title='Предупреждение о кодах', insert_text='Пожалуйста, не сообщайте никому коды из SMS/Push и данные карты. Мы их не запрашиваем.', kind=QuickCardKind.instruction),
+        QuickCard(
+            title='Уточнить: карта у клиента?',
+            insert_text='Подтвердите, пожалуйста, карта сейчас у вас на руках (да/нет)?',
+            kind=QuickCardKind.question,
+        ),
+        QuickCard(
+            title='Уточнить сумму/время',
+            insert_text='Подтвердите сумму и примерное время операции, чтобы я мог(ла) сверить данные.',
+            kind=QuickCardKind.question,
+        ),
+        QuickCard(
+            title='Подтверждение: операция не ваша',
+            insert_text='Подтвердите, пожалуйста, что вы не совершали эту операцию.',
+            kind=QuickCardKind.confirmation,
+        ),
+        QuickCard(
+            title='Предупреждение о кодах',
+            insert_text='Пожалуйста, не сообщайте никому коды из SMS/Push и данные карты. Мы их не запрашиваем.',
+            kind=QuickCardKind.instruction,
+        ),
     ]
 
     fc = []
@@ -201,6 +248,14 @@ def draft(an: AnalyzeV1, plan: Plan, tools_ui: list[ToolUI], sources: list[Sourc
             )
         ]
 
+    missing_fields_meta = build_missing_field_meta(an.intent, an.missing_fields)
+    readiness = build_readiness(
+        intent=an.intent,
+        missing_fields=an.missing_fields,
+        tools=tools_ui,
+        case_status='open',
+    )
+
     sidebar = Sidebar(
         phase=an.phase,
         intent=an.intent,
@@ -214,6 +269,8 @@ def draft(an: AnalyzeV1, plan: Plan, tools_ui: list[ToolUI], sources: list[Sourc
         ),
         sources=sources,
         tools=tools_ui,
+        missing_fields_meta=missing_fields_meta,
+        readiness=readiness,
         risk_checklist=an.risk_checklist,
         danger_flags=an.danger_flags,
         operator_notes=operator_notes,

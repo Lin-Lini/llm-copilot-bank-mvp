@@ -14,7 +14,7 @@ _STOP_WORDS = {
 
 _SECURITY_TERMS = {
     'безопас', 'мошен', 'социнж', 'удален', 'удалён', 'cvv', 'cvc', 'pin',
-    'пин', 'код', 'sms', 'push', 'пдн', 'секрет',
+    'пин', 'код', 'sms', 'push', 'пдн', 'секрет', 'компрометац',
 }
 _STATUS_TERMS = {
     'статус', 'срок', 'sla', 'эскалац', 'что дальше', 'когда', 'ожидание',
@@ -26,6 +26,17 @@ _SCRIPT_TERMS = {
 _CARD_OPS_TERMS = {
     'блокиров', 'разблокиров', 'перевыпуск', 'лимит', 'онлайн', 'платеж',
     'карта', 'оспарив', 'спорн', 'операц', 'диспут',
+}
+_DISPUTE_TERMS = {
+    'оспар', 'диспут', 'спорн', 'списан', 'платеж', 'платёж', 'чарджбэк',
+    'chargeback', 'дубликат', 'отложен', 'подписк',
+}
+_LOST_STOLEN_TERMS = {
+    'потер', 'утрат', 'украд', 'краж', 'пропал', 'компрометац', 'карта',
+}
+_FALLBACK_TERMS = {
+    'недоступ', 'fallback', 'фолбэк', 'резерв', 'временно', 'инструмент',
+    'сервис', 'не работает', 'ошибка', 'недоступны',
 }
 
 _DOC_CODE_RE = re.compile(r'\b([A-Z]+-[A-Z]+-\d+)\b', flags=re.IGNORECASE)
@@ -77,6 +88,7 @@ def build_search_queries(user_query: str) -> list[PlannedQuery]:
 
     planned: list[PlannedQuery] = []
     seen: set[tuple[str, str, str | None]] = set()
+    terms = significant_terms(q, limit=10)
 
     def add(item: PlannedQuery) -> None:
         key = (item.label, item.query, item.doc_code)
@@ -90,12 +102,11 @@ def build_search_queries(user_query: str) -> list[PlannedQuery]:
             label='policy',
             query=q,
             weight=1.0,
-            source_types=('policy', 'procedure', 'security'),
+            source_types=('policy', 'procedure', 'security', 'fallback'),
             prefer_chunk_types=('step', 'checklist', 'condition', 'warning'),
         )
     )
 
-    terms = significant_terms(q, limit=8)
     recall_q = ' '.join(terms[:6])
     if recall_q and recall_q != q.lower():
         add(
@@ -103,7 +114,7 @@ def build_search_queries(user_query: str) -> list[PlannedQuery]:
                 label='recall',
                 query=recall_q,
                 weight=0.82,
-                source_types=('policy', 'procedure', 'script', 'security'),
+                source_types=('policy', 'procedure', 'script', 'security', 'fallback'),
                 prefer_chunk_types=('step', 'checklist', 'warning', 'paragraph'),
             )
         )
@@ -116,22 +127,73 @@ def build_search_queries(user_query: str) -> list[PlannedQuery]:
                 label='doc_code',
                 query=doc_code,
                 weight=1.08,
-                source_types=('policy', 'procedure', 'script', 'security'),
+                source_types=('policy', 'procedure', 'script', 'security', 'fallback'),
                 prefer_chunk_types=('step', 'warning', 'checklist', 'paragraph'),
                 doc_code=doc_code,
             )
         )
 
     if _has_any(q, _SECURITY_TERMS):
-        safety_terms = [t for t in terms if any(x in t for x in ('мошен', 'безопас', 'код', 'cvv', 'cvc', 'pin', 'пин', 'пдн', 'sms', 'push', 'социнж', 'удален'))]
+        safety_terms = [
+            t for t in terms
+            if any(x in t for x in ('мошен', 'безопас', 'код', 'cvv', 'cvc', 'pin', 'пин', 'пдн', 'sms', 'push', 'социнж', 'удален', 'компрометац'))
+        ]
         add(
             PlannedQuery(
                 label='safety',
                 query=' '.join(safety_terms) or q,
-                weight=1.05,
-                source_types=('security', 'policy', 'script'),
+                weight=1.16,
+                source_types=('security', 'policy'),
                 prefer_chunk_types=('warning', 'checklist', 'condition'),
                 risk_tags=('security', 'fraud'),
+            )
+        )
+
+    if _has_any(q, _DISPUTE_TERMS):
+        dispute_terms = [
+            t for t in terms
+            if any(x in t for x in ('оспар', 'диспут', 'спорн', 'списан', 'платеж', 'платёж', 'дубликат', 'подписк', 'chargeback'))
+        ]
+        add(
+            PlannedQuery(
+                label='dispute',
+                query=' '.join(dispute_terms) or q,
+                weight=1.04,
+                source_types=('policy', 'procedure', 'security'),
+                prefer_chunk_types=('step', 'condition', 'checklist', 'paragraph'),
+                risk_tags=('dispute', 'fraud'),
+            )
+        )
+
+    if _has_any(q, _LOST_STOLEN_TERMS):
+        lost_terms = [
+            t for t in terms
+            if any(x in t for x in ('потер', 'утрат', 'украд', 'краж', 'пропал', 'компрометац', 'карт'))
+        ]
+        add(
+            PlannedQuery(
+                label='lost_stolen',
+                query=' '.join(lost_terms + ['блокировка']) or q,
+                weight=1.12,
+                source_types=('security', 'policy', 'procedure'),
+                prefer_chunk_types=('step', 'condition', 'checklist', 'warning'),
+                risk_tags=('security', 'lost_stolen'),
+            )
+        )
+
+    if _has_any(q, _FALLBACK_TERMS):
+        fallback_terms = [
+            t for t in terms
+            if any(x in t for x in ('недоступ', 'fallback', 'фолбэк', 'резерв', 'временн', 'инструмент', 'сервис', 'ошибк'))
+        ]
+        add(
+            PlannedQuery(
+                label='fallback',
+                query=' '.join(fallback_terms + ['fallback']) or q,
+                weight=1.18,
+                source_types=('fallback', 'procedure', 'policy', 'script'),
+                prefer_chunk_types=('step', 'condition', 'paragraph', 'checklist'),
+                risk_tags=('fallback',),
             )
         )
 
@@ -154,20 +216,23 @@ def build_search_queries(user_query: str) -> list[PlannedQuery]:
             PlannedQuery(
                 label='script',
                 query=' '.join(script_terms) or q,
-                weight=0.9,
+                weight=0.92,
                 source_types=('script', 'security', 'policy'),
                 prefer_chunk_types=('warning', 'step', 'paragraph'),
             )
         )
 
     if _has_any(q, _CARD_OPS_TERMS):
-        ops_terms = [t for t in terms if any(x in t for x in ('блок', 'разблок', 'перевыпуск', 'лимит', 'онлайн', 'карта', 'операц', 'оспар', 'диспут'))]
+        ops_terms = [
+            t for t in terms
+            if any(x in t for x in ('блок', 'разблок', 'перевыпуск', 'лимит', 'онлайн', 'карта', 'операц', 'оспар', 'диспут'))
+        ]
         add(
             PlannedQuery(
                 label='card_ops',
                 query=' '.join(ops_terms) or q,
                 weight=0.94,
-                source_types=('procedure', 'policy', 'script'),
+                source_types=('security', 'policy', 'procedure'),
                 prefer_chunk_types=('step', 'condition', 'checklist'),
                 risk_tags=('card_ops', 'dispute'),
             )
