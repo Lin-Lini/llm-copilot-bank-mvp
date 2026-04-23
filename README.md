@@ -48,8 +48,6 @@
 - `StatusWhatNext`;
 - `UnblockReissue`.
 
-Проект уже не ограничивается одним демонстрационным happy path. В нём есть раздельная логика для спорной операции, утраты карты, повторного списания, холда, подписки, спора с мерчантом, проблем с онлайн-платежами, статуса обращения и разблокировки/перевыпуска.
-
 ## Архитектура
 
 Сервисы:
@@ -63,7 +61,6 @@
 - `kafka` — event bus.
 
 Ключевой принцип: языковая модель не меняет состояние системы напрямую. Она формирует анализ, черновик и пояснения, а фактическое изменение состояния происходит только после результата инструмента.
-
 
 ## Схема взаимодействия сервисов
 
@@ -161,59 +158,14 @@ sequenceDiagram
 └── .env.example
 ```
 
-Назначение основных частей:
-
-- `apps/` — исполняемые сервисы;
-- `libs/common/` — общая доменная и инфраструктурная логика;
-- `packages/contracts/` — схемы и контракты Pydantic;
-- `docs/rag_corpus/` — начальный корпус регламентов и скриптов;
-- `docs/eval/` — артефакты оценки retrieval;
-- `tests/` — unit и runtime-oriented тесты.
-
-## Технологический стек
-
-- Python 3.11;
-- FastAPI;
-- SQLAlchemy 2 + asyncpg;
-- PostgreSQL + pgvector;
-- Redis;
-- MinIO;
-- Kafka / Redpanda;
-- Alembic;
-- Pydantic v2;
-- Docker / Docker Compose.
-
-Режимы LLM и эмбеддингов:
-
-- `stub` — детерминированный режим для локальной разработки и тестов;
-- `openai_compat` — совместимый внешний провайдер;
-- `contracts_http` — внешний HTTP-адаптер для контрактных JSON-ответов.
-
 ## Быстрый запуск
-
-### Требования
-
-Нужны:
-
-- Docker и Docker Compose;
-- свободные порты:
-  - `8080` — backend;
-  - `8090` — `mcp_tools`;
-  - `5432` — PostgreSQL;
-  - `6379` — Redis;
-  - `9000` / `9001` — MinIO и консоль MinIO;
-  - `19092` / `19644` — Kafka/Redpanda.
-
-### Запуск
 
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Миграции применяются сервисом `migrate` до старта `backend`, `worker` и `mcp_tools`.
-
-### Базовая проверка
+Базовая проверка:
 
 ```bash
 curl http://localhost:8080/health
@@ -223,76 +175,25 @@ curl http://localhost:8090/readiness
 docker compose ps
 ```
 
-## Конфигурация
-
-Основные переменные задаются через `.env`. Ключевые группы:
-
-- инфраструктура: `DATABASE_URL`, `REDIS_URL`, `MINIO_*`, `KAFKA_*`;
-- внешний сервис инструментов: `MCP_TOOLS_URL`;
-- модели: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_*_MODEL`, `LLM_API_KEY`;
-- эмбеддинги: `EMBED_PROVIDER`, `EMBED_BASE_URL`, `EMBED_MODEL`;
-- RAG: `RAG_SEED_DIR`;
-- внутренний доступ: `INTERNAL_AUTH_*`.
-
-Важно:
-
-- не храните рабочие `LLM_API_KEY` и production-секреты в репозитории;
-- `INTERNAL_AUTH_SIGNING_KEY` должен быть длинным случайным секретом;
-- после `docker compose down -v` требуется заново загрузить начальный корпус документов.
-
-## Корпус знаний и RAG
-
-В `docs/rag_corpus/` лежит стартовый набор документов по карточным сценариям:
-
-- спорные операции и подозрительные списания;
-- блокировка карты, утрата и кража;
-- подписки и merchant dispute;
-- статусы кейсов и эскалация;
-- информационная безопасность;
-- операторские скрипты.
-
-Поддерживаются:
-
-- загрузка `docx`, `pdf`, `txt`;
-- bootstrap начального корпуса;
-- автоматическая переиндексация;
-- расширенные метаданные фрагментов;
-- планировщик запроса и дополнительное ранжирование;
-- отдельный набор оценки retrieval в `docs/eval/`.
-
-Запуск оценки retrieval:
-
-```bash
-PYTHONPATH=packages/contracts/src:. python scripts/eval_rag.py
-```
-
 ## Модель доступа и доверия
 
-### Общий принцип
+Браузер не считается доверенной стороной. Все реальные вызовы должны идти через серверный BFF. `backend` и `mcp_tools` ожидают signed internal headers с контекстом субъекта.
 
-Браузер или внешний клиент не считаются доверенной стороной. `backend` и `mcp_tools` ждут signed internal headers с контекстом субъекта.
+Используются заголовки:
 
-### Основные заголовки
+- `X-Internal-Claims`
+- `X-Internal-Signature`
+- `X-Request-Id`
+- `X-Actor-Role`
+- `X-Actor-Id`
+- при необходимости `X-Origin-Actor-Role` и `X-Origin-Actor-Id`
 
-Используются:
+Роли:
 
-- `X-Internal-Claims`;
-- `X-Internal-Signature`;
-- `X-Request-Id`;
-- `X-Actor-Role`;
-- `X-Actor-Id`;
-- при необходимости `X-Origin-Actor-Role` и `X-Origin-Actor-Id`.
+- `operator` — пользовательский и операторский контур;
+- `service` — межсервисный контур.
 
-В проекте есть helper `build_internal_headers(...)` в `libs/common/internal_auth.py`, который формирует корректный набор заголовков.
-
-### Роли
-
-Поддерживаются две роли:
-
-- `operator` — основной субъект для пользовательских и операторских действий;
-- `service` — межсервисный субъект внутри доверенного контура.
-
-### Что важно учитывать
+Что важно учитывать:
 
 - защищённые backend-endpoint без signed headers возвращают `401`;
 - direct-вызов `mcp_tools /api/v1/tools/execute` требует `actor_role=operator`, а вызов с `service`-заголовками возвращает `403`;
@@ -301,9 +202,7 @@ PYTHONPATH=packages/contracts/src:. python scripts/eval_rag.py
 
 ## API: backend
 
-### Что видно в публичной OpenAPI-схеме
-
-Backend публикует OpenAPI только для основного пользовательского контура.
+### Публичные маршруты
 
 #### Диалоги
 
@@ -311,7 +210,7 @@ Backend публикует OpenAPI только для основного пол
 - `GET /api/v1/chat/conversations/{conversation_id}/messages`
 - `POST /api/v1/chat/conversations/{conversation_id}/messages`
 - `GET /api/v1/chat/stream`
-- `GET /api/v1/chat/ws` (WebSocket)
+- `GET /api/v1/chat/ws`
 
 #### Copilot
 
@@ -336,11 +235,7 @@ Backend публикует OpenAPI только для основного пол
 - `GET /health`
 - `GET /readiness`
 
-### Скрытые backend-endpoint, исключённые из публичной схемы
-
-Они доступны в коде и runtime, но помечены как `include_in_schema=False`.
-
-#### Документы
+### Скрытые backend-endpoint
 
 - `POST /api/v1/docs/upload`
 - `POST /api/v1/docs/bootstrap-seed`
@@ -348,28 +243,15 @@ Backend публикует OpenAPI только для основного пол
 - `GET /api/v1/docs`
 - `GET /api/v1/docs/{doc_id}`
 - `GET /api/v1/docs/{doc_id}/chunks`
-
-#### Поиск
-
 - `POST /api/v1/rag/search`
-
-#### Аудит и воспроизведение
-
 - `GET /api/v1/audit`
 - `GET /api/v1/audit/trace/{trace_id}`
 - `GET /api/v1/audit/trace/{trace_id}/replay`
 - `GET /api/v1/audit/trace/{trace_id}/export`
-
-#### Внутренние service-to-service endpoint
-
 - `POST /api/v1/_internal/cases/create`
 - `GET /api/v1/_internal/cases/status`
 
-Эти маршруты предназначены для доверенного контура и не должны торчать наружу без промежуточного слоя доступа.
-
 ## API: `mcp_tools`
-
-Сервис публикует отдельную OpenAPI-схему и отвечает на:
 
 - `POST /api/v1/tools/execute`
 - `GET /health`
@@ -387,42 +269,403 @@ Backend публикует OpenAPI только для основного пол
 - `set_card_limits`
 - `toggle_online_payments`
 
-Часть инструментов сейчас остаётся `mock`, но вызовы, валидация и идемпотентность уже живут как отдельный сервисный контракт.
+## Примеры запросов и ответов для frontend/BFF
 
-## Типовой сценарий работы через API
+Ниже именно интеграционные примеры. Они нужны не браузеру напрямую, а BFF, который уже добавляет signed internal headers.
 
-1. Создать разговор: `POST /api/v1/chat/conversations`.
-2. Добавить сообщение: `POST /api/v1/chat/conversations/{conversation_id}/messages`.
-3. Построить подсказку: `POST /api/v1/copilot/suggest`.
-4. Получить состояние задачи:
-   - polling через `GET /api/v1/copilot/suggest/{task_id}`;
-   - или stream через `GET /api/v1/copilot/suggest/{task_id}/stream`.
-5. Получить текущее состояние диалога: `GET /api/v1/copilot/state`.
-6. Выполнить разрешённый инструмент: `POST /api/v1/copilot/tools/execute`.
-7. Получить кейс, dossier, timeline и аудит.
+### 1. Создание разговора
+
+Запрос:
+
+```http
+POST /api/v1/chat/conversations
+```
+
+Ответ:
+
+```json
+{
+  "conversation_id": "9384fe5f-67e5-4003-be84-33d2811d6ecb"
+}
+```
+
+### 2. Отправка сообщения в разговор
+
+Запрос:
+
+```http
+POST /api/v1/chat/conversations/{conversation_id}/messages
+Content-Type: application/json
+
+{
+  "content": "Я не совершал эту операцию, карта у меня"
+}
+```
+
+Минимальный практический пример `curl`:
+
+```bash
+curl -s -X POST "http://localhost:8080/api/v1/chat/conversations/<CONVERSATION_ID>/messages" \
+  -H "Content-Type: application/json" \
+  --data '{"content":"Я не совершал эту операцию, карта у меня"}'
+```
+
+Ответ:
+
+```json
+{
+  "id": 14
+}
+```
+
+### 3. Запуск `suggest`
+
+Запрос:
+
+```http
+POST /api/v1/copilot/suggest
+Content-Type: application/json
+
+{
+  "conversation_id": "9384fe5f-67e5-4003-be84-33d2811d6ecb",
+  "max_messages": 20
+}
+```
+
+Ответ:
+
+```json
+{
+  "task_id": "28d5c0b4-f51f-4c29-94e9-c7e2ef2a090d"
+}
+```
+
+### 4. Polling статуса задачи
+
+Запрос:
+
+```http
+GET /api/v1/copilot/suggest/{task_id}
+```
+
+Промежуточный ответ:
+
+```json
+{
+  "task_id": "28d5c0b4-f51f-4c29-94e9-c7e2ef2a090d",
+  "status": "running",
+  "error": null,
+  "result": null
+}
+```
+
+Финальный ответ:
+
+```json
+{
+  "task_id": "28d5c0b4-f51f-4c29-94e9-c7e2ef2a090d",
+  "status": "succeeded",
+  "error": null,
+  "result": {
+    "schema_version": "1.0",
+    "ghost_text": "Понимаю ваше беспокойство...",
+    "quick_cards": [],
+    "form_cards": [],
+    "sidebar": {
+      "phase": "Collect",
+      "intent": "SuspiciousTransaction",
+      "plan": {
+        "current_step_id": "collect_core",
+        "steps": []
+      },
+      "sources": [],
+      "tools": [],
+      "risk_checklist": [],
+      "danger_flags": []
+    }
+  }
+}
+```
+
+### 5. SSE-стрим прогресса `suggest`
+
+Запрос:
+
+```http
+GET /api/v1/copilot/suggest/{task_id}/stream
+```
+
+Типовые события:
+
+```text
+event: status
+data: {"task_id":"...","status":"running"}
+
+event: progress
+data: {"task_id":"...","progress":35}
+
+event: ghost
+data: {"task_id":"...","text":"Понимаю ваше беспокойство..."}
+
+event: result
+data: {"task_id":"...","result":{...DRAFT JSON...}}
+```
+
+Для frontend это удобно разделять на две зоны:
+- polling или SSE для статуса задачи;
+- отдельный рендер `ghost_text` по мере прихода кусочков.
+
+### 6. Получение текущего `copilot state`
+
+Запрос:
+
+```http
+GET /api/v1/copilot/state?conversation_id=9384fe5f-67e5-4003-be84-33d2811d6ecb
+```
+
+Ответ сокращённо:
+
+```json
+{
+  "conversation_id": "9384fe5f-67e5-4003-be84-33d2811d6ecb",
+  "intent": "SuspiciousTransaction",
+  "phase": "Collect",
+  "plan": {
+    "current_step_id": "collect_core",
+    "steps": [
+      {"id":"collect_core","title":"Сбор обязательных данных","done":false}
+    ]
+  },
+  "last_analyze": {
+    "missing_fields": ["txn_amount_confirm","txn_datetime_confirm"],
+    "next_questions": [
+      "Подтвердите сумму спорной операции.",
+      "Подтвердите примерные дату и время спорной операции."
+    ]
+  },
+  "last_draft": {
+    "ghost_text": "Понимаю ваше беспокойство...",
+    "sidebar": {
+      "tools": [
+        {
+          "tool": "create_case",
+          "label": "Создать обращение",
+          "enabled": true,
+          "reason": "Можно зарегистрировать обращение с последующим уточнением."
+        },
+        {
+          "tool": "get_transactions",
+          "label": "Открыть операции (mock)",
+          "enabled": false,
+          "reason": "Нужно уточнить наличие карты, сумму и время операции."
+        }
+      ]
+    }
+  }
+}
+```
+
+### 7. Как frontend должен рендерить `state` и `draft`
+
+Практически полезно раскладывать ответ так:
+
+- левая колонка: история сообщений;
+- центральная колонка: `ghost_text`, `quick_cards`, `form_cards`;
+- правая колонка: `sidebar.phase`, `sidebar.intent`, `sidebar.plan.steps`, `sidebar.sources`, `sidebar.tools`, `sidebar.risk_checklist`, `sidebar.danger_flags`;
+- action bar: только `sidebar.tools`, учитывая `enabled/reason`.
+
+Frontend не должен сам придумывать, какие кнопки активны. Источник истины — `sidebar.tools[].enabled`.
+
+### 8. Выполнение инструмента через backend
+
+Запрос:
+
+```http
+POST /api/v1/copilot/tools/execute
+Content-Type: application/json
+
+{
+  "conversation_id": "4d462def-167f-4d3e-9fc0-f5452a769dd2",
+  "tool": "create_case",
+  "params": {
+    "intent": "SuspiciousTransaction",
+    "summary_public": "Endpoint smoke case"
+  },
+  "idempotency_key": "case-001"
+}
+```
+
+Ответ сокращённо:
+
+```json
+{
+  "tool": "create_case",
+  "result": {
+    "case_id": "e4fc936a-6fd5-4a07-bfce-4d6ef510ae80",
+    "status": "open",
+    "case_type": "SuspiciousTransaction",
+    "priority": "high",
+    "sla_deadline": "2026-04-26T09:01:22.506942+00:00",
+    "created_at": "2026-04-23T09:01:22.507626+00:00"
+  },
+  "explain": {
+    "schema_version": "1.0",
+    "ghost_text": "Обращение зарегистрировано...",
+    "updates": {
+      "phase": "Act",
+      "plan": {
+        "current_step_id": "act_get_txn",
+        "steps": []
+      }
+    },
+    "quick_cards": [
+      {
+        "title": "Сообщить номер обращения",
+        "insert_text": "Обращение зарегистрировано. Номер обращения: e4fc936a-6fd5-4a07-bfce-4d6ef510ae80.",
+        "kind": "status"
+      }
+    ]
+  }
+}
+```
+
+Важно:
+- сначала для `conversation_id` должен существовать `copilot state`;
+- проще говоря, frontend обычно сначала делает `suggest`, а уже потом подтверждает `tool`.
+
+### 9. Получение списка кейсов
+
+Запрос:
+
+```http
+GET /api/v1/cases?conversation_id=4d462def-167f-4d3e-9fc0-f5452a769dd2
+```
+
+Ответ сокращённо:
+
+```json
+{
+  "items": [
+    {
+      "case_id": "e4fc936a-6fd5-4a07-bfce-4d6ef510ae80",
+      "conversation_id": "4d462def-167f-4d3e-9fc0-f5452a769dd2",
+      "case_type": "SuspiciousTransaction",
+      "status": "open",
+      "summary_public": "Endpoint smoke case",
+      "facts_confirmed": ["dispute_subtype","requested_actions"],
+      "facts_pending": ["card_in_possession","txn_amount_confirm","txn_datetime_confirm"],
+      "readiness": {
+        "score": 20,
+        "status": "needs_info",
+        "blockers": ["card_in_possession","txn_amount_confirm","txn_datetime_confirm"]
+      }
+    }
+  ]
+}
+```
+
+### 10. Получение dossier
+
+Запрос:
+
+```http
+GET /api/v1/cases/{case_id}/dossier
+```
+
+Ответ сокращённо:
+
+```json
+{
+  "case_id": "eae8f28d-cd7e-4bd8-8b8b-eb84647ce5b8",
+  "intent": "LostStolen",
+  "client_problem_summary": "Regression smoke for lost/stolen mixed scenario",
+  "confirmed_facts": [
+    "Подтвержден факт утраты карты",
+    "Уточнен тип спора",
+    "Подтверждены признаки компрометации"
+  ],
+  "pending_facts": [],
+  "risk_summary": {
+    "risk_level": "high",
+    "danger_flags": [
+      "Клиент сообщил код из SMS/Push.",
+      "Есть риск утраты, кражи или компрометации карты."
+    ]
+  },
+  "current_status": "open",
+  "next_expected_step": "Следующее действие: block_card."
+}
+```
+
+### 11. Получение аудита
+
+Запрос:
+
+```http
+GET /api/v1/audit?conversation_id=4d462def-167f-4d3e-9fc0-f5452a769dd2
+```
+
+Ответ сокращённо:
+
+```json
+{
+  "items": [
+    {
+      "id": 275,
+      "trace_id": "ab5dddea-3c0f-4706-8087-619e72a91f10",
+      "event_type": "tool_result",
+      "actor_role": "operator",
+      "conversation_id": "4d462def-167f-4d3e-9fc0-f5452a769dd2",
+      "case_id": "e4fc936a-6fd5-4a07-bfce-4d6ef510ae80",
+      "payload": {
+        "tool": "create_case",
+        "result": {
+          "status": "open",
+          "case_id": "e4fc936a-6fd5-4a07-bfce-4d6ef510ae80"
+        }
+      }
+    }
+  ]
+}
+```
+
+### 12. SSE по событиям чата
+
+```http
+GET /api/v1/chat/stream?conversation_id={conversation_id}
+```
+
+Типовое событие:
+
+```text
+event: message_created
+data: {"conversation_id":"...","message_id":17,"actor_role":"client"}
+```
+
+### 13. WebSocket по событиям чата
+
+```text
+GET /api/v1/chat/ws?conversation_id={conversation_id}
+```
+
+Frontend может использовать его как альтернативу SSE, если удобнее держать единый канал двусторонней связи.
+
+### 14. Direct `mcp_tools` не для браузера
+
+`POST /api/v1/tools/execute` на `:8090` нужен для отдельного сервисного контура и smoke/debug-проверок. Для frontend правильный путь — через backend endpoint `POST /api/v1/copilot/tools/execute`.
+
+## Типовой сценарий работы через frontend/BFF
+
+1. Создать `conversation_id`.
+2. Отправить пользовательское или операторское сообщение.
+3. Запустить `suggest`.
+4. Либо поллить `GET /api/v1/copilot/suggest/{task_id}`, либо подписаться на `.../stream`.
+5. Отрендерить `ghost_text`, `quick_cards`, `form_cards`, `sidebar`.
+6. По `sidebar.tools` показать доступные действия.
+7. При подтверждении действия вызвать `POST /api/v1/copilot/tools/execute`.
+8. После результата обновить `copilot state`, `cases`, `dossier`, `audit`.
 
 ## Проверенные runtime smoke и endpoint smoke
-
-На локальном Docker-контуре подтверждены:
-
-### Бизнес-сценарии
-
-- `LostStolen` и смешанный high-risk сценарий с компрометацией;
-- `recurring_subscription`;
-- `duplicate_charge`;
-- `reversal_pending`;
-- `merchant_dispute`;
-- `CardNotWorking / online`;
-- `StatusWhatNext`;
-- `UnblockReissue`.
-
-### Потоковые каналы
-
-- `GET /api/v1/copilot/suggest/{task_id}/stream`;
-- `GET /api/v1/chat/stream`;
-- `GET /api/v1/chat/ws`.
-
-### Endpoint-проверки
 
 Подтверждены:
 
@@ -430,6 +673,9 @@ Backend публикует OpenAPI только для основного пол
 - OpenAPI-схема backend и `mcp_tools`;
 - `GET /api/v1/cases`;
 - `GET /api/v1/audit`;
+- `GET /api/v1/copilot/suggest/{task_id}/stream`;
+- `GET /api/v1/chat/stream`;
+- `GET /api/v1/chat/ws`;
 - direct `POST /api/v1/tools/execute` в `mcp_tools`;
 - `401` на backend protected endpoint без internal auth;
 - `403` на direct `mcp_tools` при вызове от имени `service` вместо `operator`;
@@ -452,45 +698,12 @@ pip install -r requirements.txt
 PYTHONPATH=packages/contracts/src:. python -m pytest -q
 ```
 
-Синтаксическая проверка:
-
-```bash
-python -m compileall apps libs packages/contracts/src tests
-```
-
-## Команды разработки
-
-```bash
-make up
-make down
-make reset
-make logs
-make ps
-make migrate
-make rebuild
-make test
-make lint
-```
-
 ## Ограничения текущей версии
-
-Проект уже рабочий, но в нём ещё остаются зоны для доводки:
 
 - retrieval по источникам местами шумный и требует дополнительной настройки под intent;
 - часть инструментов реализована как `mock`;
 - формулировки `ghost_text` и explain ещё можно полировать;
-- для действительно неоднозначных формулировок полезно добавить дополнительный bounded fallback-слой поверх основного `ANALYZE`, но не вместо детерминированных правил.
-
-## Дальнейшее развитие
-
-Логичные направления следующего этапа:
-
-- улучшение retrieval по доменным сценариям;
-- дополнительная полировка операторских текстов;
-- расширение карты кейсов и доменных признаков;
-- развитие итогового dossier;
-- усиление автоматизированных runtime smoke до отдельного скрипта матрицы сценариев;
-- подготовка внешнего BFF или интерфейса оператора поверх текущего серверного контура.
+- для действительно неоднозначных формулировок полезно добавить bounded fallback-слой поверх основного `ANALYZE`, но не вместо детерминированных правил.
 
 ## Итог
 
