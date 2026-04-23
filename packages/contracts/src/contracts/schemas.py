@@ -63,6 +63,50 @@ class ChannelHint(str, Enum):
     unknown = 'unknown'
 
 
+class DisputeSubtype(str, Enum):
+    unknown = 'unknown'
+    suspicious = 'suspicious'
+    recurring_subscription = 'recurring_subscription'
+    duplicate_charge = 'duplicate_charge'
+    reversal_pending = 'reversal_pending'
+    cash_withdrawal = 'cash_withdrawal'
+    card_present = 'card_present'
+    merchant_dispute = 'merchant_dispute'
+
+
+class CardState(str, Enum):
+    unknown = 'unknown'
+    with_client = 'with_client'
+    lost = 'lost'
+    stolen = 'stolen'
+    blocked = 'blocked'
+    damaged = 'damaged'
+
+
+class RequestedAction(str, Enum):
+    block_card = 'block_card'
+    unblock_card = 'unblock_card'
+    reissue_card = 'reissue_card'
+    get_case_status = 'get_case_status'
+    investigate_transaction = 'investigate_transaction'
+
+
+class StatusContext(str, Enum):
+    unknown = 'unknown'
+    case_known = 'case_known'
+    case_unknown = 'case_unknown'
+    waiting_review = 'waiting_review'
+    resolved = 'resolved'
+
+
+class CompromiseSignal(str, Enum):
+    sms_code_shared = 'sms_code_shared'
+    safe_account = 'safe_account'
+    remote_access = 'remote_access'
+    spoofed_call = 'spoofed_call'
+    cvv_shared = 'cvv_shared'
+
+
 class SourceOut(StrictModel):
     doc_id: str
     title: str
@@ -208,6 +252,11 @@ class AnalyzeFacts(StrictModel):
     card_in_possession: str
     delivery_pref: str | None
     previous_actions: list[str]
+    dispute_subtype: DisputeSubtype = DisputeSubtype.unknown
+    card_state: CardState = CardState.unknown
+    requested_actions: list[RequestedAction] = Field(default_factory=list)
+    status_context: StatusContext = StatusContext.unknown
+    compromise_signals: list[CompromiseSignal] = Field(default_factory=list)
 
 
 class ProfileUpdate(StrictModel):
