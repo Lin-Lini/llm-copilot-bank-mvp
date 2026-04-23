@@ -5,12 +5,17 @@ from typing import Any
 
 from contracts.schemas import (
     AnalyzeV1,
+    CardState,
     DangerFlag,
+    DisputeSubtype,
     DraftV1,
     ExplainV1,
     Intent,
+    RequestedAction,
     RiskChecklistItem,
 )
+from libs.common.case_readiness import build_missing_field_meta, build_readiness
+from libs.common.state_engine import resolve_tools
 
 
 _BAD_TAILS = (
@@ -23,10 +28,24 @@ _BAD_TAILS = (
     'сумму и пример',
     'дату и пример',
     'время и пример',
+    'для вашей безопасности необходимо',
+    'для вашей безопасности нужно',
+    'необходимо не',
+    'нужно не',
+    'следует не',
 )
 
 _INCOMPLETE_ENDINGS_RE = re.compile(
-    r'(сумму и пример|дату и пример|время и пример|что вы не совершали|что карта сейчас)\s*$',
+    r'('
+    r'сумму и пример|дату и пример|время и пример|что вы не совершали|что карта сейчас|'
+    r'для вашей безопасности необходимо|для вашей безопасности нужно|'
+    r'необходимо не|нужно не|следует не'
+    r')\s*[.!?]?$',
+    re.IGNORECASE,
+)
+
+_BROKEN_MODAL_RE = re.compile(
+    r'(?:для\s+вашей\s+безопасности\s+)?(?:необходимо|нужно|следует|важно|рекомендуется)\s+не\.$',
     re.IGNORECASE,
 )
 
@@ -56,6 +75,8 @@ def _looks_truncated(text: str) -> bool:
     if any(lower.endswith(x) for x in _BAD_TAILS):
         return True
     if _INCOMPLETE_ENDINGS_RE.search(lower):
+        return True
+    if _BROKEN_MODAL_RE.search(lower):
         return True
 
     if re.search(r'\n\s*\d+\.\s*$', t):
@@ -90,22 +111,77 @@ def _ensure_terminal_punct(text: str) -> str:
 
 
 def _fallback_draft_ghost(an: AnalyzeV1) -> str:
+    actions = set(an.facts.requested_actions or [])
+    signals = set(an.facts.compromise_signals or [])
+    subtype = an.facts.dispute_subtype
+    card_state = an.facts.card_state
+
+    if an.intent in {Intent.LostStolen, Intent.BlockCard} or card_state in {CardState.lost, CardState.stolen}:
+        if RequestedAction.reissue_card in actions:
+            return (
+                'Поскольку карта утеряна или скомпрометирована, для безопасности сначала нужно заблокировать карту. '
+                'После подтверждения результата я подскажу, как оформить перевыпуск и какие дальнейшие шаги нужны по обращению.'
+            )
+        return (
+            'Поскольку карта утеряна или есть риск ее компрометации, для безопасности сначала нужно заблокировать карту. '
+            'После этого я подскажу следующие шаги и при необходимости помогу оформить обращение.'
+        )
+
     if an.intent == Intent.SuspiciousTransaction:
+        if subtype == DisputeSubtype.recurring_subscription:
+            return (
+                'Пожалуйста, уточните название сервиса или подписки, сумму и примерное время списания. '
+                'После этого я подскажу следующий безопасный шаг по проверке операции.'
+            )
+        if subtype == DisputeSubtype.duplicate_charge:
+            return (
+                'Пожалуйста, уточните сумму и примерное время операции, а также подтвердите, что списание произошло дважды. '
+                'После этого я подскажу следующий безопасный шаг по проверке операции.'
+            )
+        if subtype == DisputeSubtype.reversal_pending:
+            return (
+                'Пожалуйста, уточните сумму и примерное время операции и подтвердите, что вы видите холд или резерв. '
+                'После этого я подскажу следующий безопасный шаг.'
+            )
+        if signals or card_state in {CardState.lost, CardState.stolen} or RequestedAction.reissue_card in actions:
+            return (
+                'Поскольку есть признаки компрометации и проблема с картой, для безопасности сначала нужно подтвердить блокировку карты. '
+                'После этого я подскажу, как оформить перевыпуск и какие данные еще нужны для обращения.'
+            )
         return (
             'Пожалуйста, уточните сумму и примерное время операции, а также подтвердите, '
             'что карта у вас на руках и что вы не совершали эту операцию. '
             'После этого я подскажу следующий безопасный шаг.'
         )
-    if an.intent in {Intent.BlockCard, Intent.LostStolen}:
+
+    if an.intent == Intent.UnblockReissue:
+        if RequestedAction.unblock_card in actions:
+            return (
+                'Пожалуйста, уточните номер обращения или контекст блокировки, чтобы можно было безопасно проверить допустимость разблокировки. '
+                'После этого я подскажу следующий шаг.'
+            )
         return (
-            'Подтвердите, пожалуйста, что карту нужно заблокировать прямо сейчас. '
-            'После подтверждения я подскажу следующий безопасный шаг.'
+            'Пожалуйста, подтвердите, что вам нужен перевыпуск карты, и кратко уточните причину. '
+            'После этого я подскажу следующий безопасный шаг.'
         )
+
+    if an.intent == Intent.CardNotWorking:
+        if an.facts.card_state == CardState.damaged:
+            return (
+                'Похоже, проблема может быть связана с повреждением карты. '
+                'Подтвердите это, пожалуйста, и после этого я подскажу следующий шаг по перевыпуску.'
+            )
+        return (
+            'Пожалуйста, уточните, где именно не работает карта: в магазине, онлайн или в банкомате. '
+            'После этого я подскажу следующий безопасный шаг.'
+        )
+
     if an.intent == Intent.StatusWhatNext:
         return (
             'Подскажите, пожалуйста, номер обращения или уточните, по какой операции нужен статус. '
             'После этого я смогу подсказать следующий шаг.'
         )
+
     return 'Пожалуйста, уточните недостающие детали обращения, чтобы я мог подсказать следующий шаг.'
 
 
@@ -148,6 +224,30 @@ def _coerce_risk_checklist(raw: Any) -> list[RiskChecklistItem]:
     return out
 
 
+def _operator_notes(an: AnalyzeV1) -> str:
+    if an.intent == Intent.SuspiciousTransaction:
+        if an.facts.card_state in {CardState.lost, CardState.stolen}:
+            return 'Есть спорная операция на фоне утраты или кражи карты: сначала блокировка и фиксация риска, затем уточнение деталей операции и перевыпуск при необходимости.'
+        if an.facts.dispute_subtype == DisputeSubtype.recurring_subscription:
+            return 'Сначала уточни название сервиса или подписки, затем переходи к проверке операций и оформлению обращения.'
+        if an.facts.dispute_subtype == DisputeSubtype.duplicate_charge:
+            return 'Сначала собери подтверждение двойного списания, потом переходи к сверке операций и фиксации обращения.'
+        if an.facts.dispute_subtype == DisputeSubtype.reversal_pending:
+            return 'Сначала проверь, идет ли речь о холде или резерве, и не предлагай блокировку как первое действие без отдельного подтверждения.'
+        return 'Сначала собери подтверждения по операции, затем переходи к сверке и оформлению обращения.'
+    if an.intent in {Intent.BlockCard, Intent.LostStolen}:
+        return 'При утрате, краже или высоком риске сначала блокировка, затем фиксация кейса и обсуждение перевыпуска.'
+    if an.intent == Intent.UnblockReissue:
+        return 'Сначала различи запрос на разблокировку и перевыпуск, не обещай разблокировку без подтвержденного контекста.'
+    if an.intent == Intent.CardNotWorking:
+        if an.facts.card_state == CardState.damaged:
+            return 'Сначала подтверди повреждение карты, затем решай вопрос с перевыпуском.'
+        return 'Сначала уточни, где именно не работает карта, и только потом проверяй лимиты или настройки.'
+    if an.intent == Intent.StatusWhatNext:
+        return 'Статус сообщай только по подтвержденному кейсу или номеру обращения, без догадок и обещаний по срокам.'
+    return 'Соберите обязательные данные и выполните следующий шаг только после подтверждения клиента.'
+
+
 def repair_draft(draft: DraftV1, an: AnalyzeV1) -> DraftV1:
     ghost = _clean_text(draft.ghost_text)
     if _looks_truncated(ghost):
@@ -160,6 +260,30 @@ def repair_draft(draft: DraftV1, an: AnalyzeV1) -> DraftV1:
         sidebar = sidebar.model_copy(update={'danger_flags': an.danger_flags})
     if not sidebar.risk_checklist and an.risk_checklist:
         sidebar = sidebar.model_copy(update={'risk_checklist': an.risk_checklist})
+
+    tools = resolve_tools(
+        an.intent,
+        sidebar.phase,
+        missing_fields=an.missing_fields,
+        analyze=an,
+    )
+    missing_fields_meta = build_missing_field_meta(an.intent, an.missing_fields, an)
+    readiness = build_readiness(
+        intent=an.intent,
+        missing_fields=an.missing_fields,
+        tools=tools,
+        case_status='open',
+        analyze=an,
+    )
+
+    sidebar = sidebar.model_copy(
+        update={
+            'tools': tools,
+            'missing_fields_meta': missing_fields_meta,
+            'readiness': readiness,
+            'operator_notes': _operator_notes(an),
+        }
+    )
 
     return draft.model_copy(update={'ghost_text': ghost, 'sidebar': sidebar})
 

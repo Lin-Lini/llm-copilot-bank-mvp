@@ -64,3 +64,14 @@ def test_worker_stabilizer_repairs_streamed_truncated_ghost():
     assert fixed['ghost_text'].endswith('.')
     assert 'что карта у вас на руках' in fixed['ghost_text']
     assert 'что вы не совершали эту операцию' in fixed['ghost_text']
+
+
+def test_worker_stabilizer_repairs_broken_modal_tail():
+    an = _analyze()
+    draft_obj = stub_draft(an, build_plan(Intent.SuspiciousTransaction), [], []).model_dump()
+    draft_obj['ghost_text'] = 'Понимаю, что ситуация неприятная. Для вашей безопасности необходимо не.'
+
+    fixed = _stabilize_draft_ghost(an.model_dump(), [], draft_obj)
+
+    assert fixed['ghost_text'].endswith('.')
+    assert 'Пожалуйста, уточните сумму' in fixed['ghost_text']

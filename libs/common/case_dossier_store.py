@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from libs.common.case_dossier import build_case_dossier
+from libs.common.case_dossier import build_analyze_from_case_context, build_case_dossier
 from libs.common.case_readiness import build_readiness, infer_case_phase, normalize_intent
+from libs.common.json_lists import parse_string_list
 from libs.common.models import Case, CaseDossierSnapshot, CaseTimeline
 from libs.common.state_engine import resolve_tools
-from libs.common.json_lists import parse_string_list
 
 DOSSIER_SCHEMA_VERSION = '1.0'
 TERMINAL_CASE_STATUSES = {'closed', 'resolved', 'done'}
@@ -21,16 +20,25 @@ def is_terminal_case_status(status: str | None) -> bool:
     return str(status or '').strip().lower() in TERMINAL_CASE_STATUSES
 
 
-def _build_readiness_for_case(case_obj: Any):
+def _build_readiness_for_case(case_obj: Any, timeline_rows: list[CaseTimeline]):
     intent = normalize_intent(getattr(case_obj, 'case_type', None))
     facts_pending = parse_string_list(getattr(case_obj, 'facts_pending_json', None))
-    phase = infer_case_phase(intent, facts_pending, getattr(case_obj, 'status', None))
-    tools_ui = resolve_tools(intent, phase, missing_fields=facts_pending)
+    facts_confirmed = parse_string_list(getattr(case_obj, 'facts_confirmed_json', None))
+    analyze = build_analyze_from_case_context(case_obj, timeline_rows)
+    phase = infer_case_phase(intent, facts_pending, getattr(case_obj, 'status', None), analyze)
+    tools_ui = resolve_tools(
+        intent,
+        phase,
+        missing_fields=facts_pending,
+        confirmed_fields=facts_confirmed,
+        analyze=analyze,
+    )
     return build_readiness(
         intent=intent,
         missing_fields=facts_pending,
         tools=tools_ui,
         case_status=getattr(case_obj, 'status', None),
+        analyze=analyze,
     )
 
 
@@ -78,7 +86,7 @@ async def get_case_dossier_payload(
         ):
             return snapshot.payload_json
 
-    readiness = _build_readiness_for_case(case_obj)
+    readiness = _build_readiness_for_case(case_obj, timeline_rows)
     dossier = build_case_dossier(
         case_obj,
         readiness=readiness,
